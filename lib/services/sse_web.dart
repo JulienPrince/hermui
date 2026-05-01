@@ -12,9 +12,17 @@ import 'dart:html' as html;
 ///
 /// Émet ligne par ligne (sans le `\n`). L'appelant reste responsable du
 /// parsing SSE (`data:` / commentaires `:`).
-Stream<String> sseStreamLines(String url, Map<String, String> headers) {
+///
+/// `method` et `body` permettent de POST un payload JSON et de streamer la
+/// réponse dans la même requête (cas de la Responses API stream:true).
+Stream<String> sseStreamLines(
+  String url,
+  Map<String, String> headers, {
+  String method = 'GET',
+  String? body,
+}) {
   final controller = StreamController<String>();
-  final xhr = html.HttpRequest()..open('GET', url);
+  final xhr = html.HttpRequest()..open(method, url);
 
   headers.forEach((k, v) => xhr.setRequestHeader(k, v));
 
@@ -67,6 +75,10 @@ Stream<String> sseStreamLines(String url, Map<String, String> headers) {
     } catch (_) {}
   };
 
-  xhr.send();
+  if (body != null) {
+    xhr.send(body);
+  } else {
+    xhr.send();
+  }
   return controller.stream;
 }

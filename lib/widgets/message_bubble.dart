@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -101,12 +104,19 @@ class ToolMessageBubble extends StatelessWidget {
 
 /// Bulle utilisateur — alignée à droite, surface2, coin bas-droit aplati.
 class UserMessageBubble extends StatelessWidget {
-  const UserMessageBubble({super.key, required this.content});
+  const UserMessageBubble({
+    super.key,
+    required this.content,
+    this.images = const [],
+  });
 
   final String content;
+  final List<ImageAttachment> images;
 
   @override
   Widget build(BuildContext context) {
+    final hasContent = content.isNotEmpty;
+    final hasImages = images.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         HermesTokens.s4,
@@ -120,20 +130,73 @@ class UserMessageBubble extends StatelessWidget {
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width * 0.78,
           ),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: const BoxDecoration(
-              color: HermesTokens.surface2,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(14),
-                topRight: Radius.circular(14),
-                bottomLeft: Radius.circular(14),
-                bottomRight: Radius.circular(4),
-              ),
-            ),
-            child: SelectableText(content, style: HermesText.body()),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasImages) ...[
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  alignment: WrapAlignment.end,
+                  children: [
+                    for (final img in images) _UserImage(attachment: img),
+                  ],
+                ),
+                if (hasContent) const SizedBox(height: 6),
+              ],
+              if (hasContent)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  decoration: const BoxDecoration(
+                    color: HermesTokens.surface2,
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(14),
+                      topRight: Radius.circular(14),
+                      bottomLeft: Radius.circular(14),
+                      bottomRight: Radius.circular(4),
+                    ),
+                  ),
+                  child: SelectableText(content, style: HermesText.body()),
+                ),
+            ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _UserImage extends StatelessWidget {
+  const _UserImage({required this.attachment});
+  final ImageAttachment attachment;
+
+  Uint8List? _decode() {
+    final url = attachment.dataUrl;
+    final i = url.indexOf(',');
+    if (i < 0) return null;
+    try {
+      return base64Decode(url.substring(i + 1));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = _decode();
+    if (bytes == null) {
+      return const SizedBox.shrink();
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(HermesTokens.rMd),
+      child: Image.memory(
+        bytes,
+        width: 180,
+        fit: BoxFit.cover,
       ),
     );
   }

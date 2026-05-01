@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers.dart';
+import '../services/hermes_service.dart';
 import '../theme/text_styles.dart';
 import '../theme/tokens.dart';
 import '../widgets/composer.dart';
@@ -26,29 +27,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     super.dispose();
   }
 
-  void _scrollToEnd() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: HermesTokens.medium,
-        curve: Curves.easeOut,
-      );
-    });
-  }
-
-  Future<void> _send() async {
-    if (_input.text.trim().isEmpty) return;
+  Future<void> _send([List<ImageAttachment> images = const []]) async {
     final text = _input.text;
+    if (text.trim().isEmpty && images.isEmpty) return;
     _input.clear();
-    await ref.read(chatControllerProvider.notifier).send(text);
-    _scrollToEnd();
+    await ref
+        .read(chatControllerProvider.notifier)
+        .send(text, images: images);
   }
 
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatControllerProvider);
-    ref.listen(chatControllerProvider, (_, _) => _scrollToEnd());
 
     return Scaffold(
       backgroundColor: HermesTokens.surface,
@@ -67,20 +57,30 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         }))
                   : Builder(
                       builder: (_) {
+                        // ListView reverse:true → items rendus de bas en haut.
+                        // Index 0 = dernier message (visible en bas), nouveau
+                        // delta s'ancre naturellement au bas sans race
+                        // condition avec le décodage async des images.
                         int? lastAssistantIdx;
                         for (var i = 0; i < chat.turns.length; i++) {
                           if (chat.turns[i].role == 'assistant') {
                             lastAssistantIdx = i;
                           }
                         }
+                        final n = chat.turns.length;
                         return ListView.builder(
                           controller: _scroll,
+                          reverse: true,
                           padding: const EdgeInsets.symmetric(vertical: 12),
-                          itemCount: chat.turns.length,
-                          itemBuilder: (_, i) {
+                          itemCount: n,
+                          itemBuilder: (_, idx) {
+                            final i = n - 1 - idx;
                             final t = chat.turns[i];
                             if (t.role == 'user') {
-                              return UserMessageBubble(content: t.content);
+                              return UserMessageBubble(
+                                content: t.content,
+                                images: t.images,
+                              );
                             }
                             if (t.role == 'tool') {
                               return ToolMessageBubble(

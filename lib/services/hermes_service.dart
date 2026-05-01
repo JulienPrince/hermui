@@ -24,6 +24,14 @@ class RunSubmission {
   final String? status;
 }
 
+/// Pièce jointe image — base64 data URL prêt à être inséré dans un payload
+/// `input_image` (Responses API) ou `image_url` (Chat Completions).
+class ImageAttachment {
+  const ImageAttachment({required this.dataUrl, required this.mimeType});
+  final String dataUrl;
+  final String mimeType;
+}
+
 /// Usage tokens — payload de l'event run.completed.
 class TokenUsage {
   const TokenUsage({this.inputTokens = 0, this.outputTokens = 0});
@@ -275,28 +283,45 @@ class HermesService {
         return 'Requête annulée.';
       case DioExceptionType.badResponse:
         final code = e.response?.statusCode;
+        final body = e.response?.data;
+        final detail = body is Map && body['error'] != null
+            ? body['error'].toString()
+            : body is Map && body['message'] != null
+                ? body['message'].toString()
+                : body is Map && body['detail'] != null
+                    ? body['detail'].toString()
+                    : body is String
+                        ? body
+                        : null;
         if (code == 401 || code == 403) {
           return 'Clé API refusée (HTTP $code). Vérifiez le Bearer token.';
         }
         if (code == 404) {
           return 'Endpoint introuvable (HTTP 404).';
         }
-        if (code != null && code >= 500) {
-          return 'Erreur serveur Hermes (HTTP $code).';
+        if (code == 413) {
+          return 'Payload trop volumineux (HTTP 413). Réduis la taille de l\'image.';
         }
-        final body = e.response?.data;
-        final detail = body is Map && body['error'] != null
-            ? body['error'].toString()
-            : body is Map && body['message'] != null
-                ? body['message'].toString()
-                : body is String
-                    ? body
-                    : null;
+        if (code == 422) {
+          return 'Format invalide (HTTP 422)${detail != null ? ' : $detail' : ''}';
+        }
+        if (code != null && code >= 500) {
+          return 'Erreur serveur Hermes (HTTP $code)${detail != null ? ' : $detail' : ''}.';
+        }
         return detail?.isNotEmpty == true
             ? 'Erreur HTTP $code : $detail'
             : 'Erreur HTTP $code';
       case DioExceptionType.unknown:
-        return e.message ?? 'Erreur réseau inconnue.';
+        final inner = e.error;
+        final base = e.message ?? '';
+        if (inner != null) {
+          final innerMsg = inner.toString();
+          if (base.isNotEmpty && !base.contains(innerMsg)) {
+            return 'Erreur réseau : $base ($innerMsg)';
+          }
+          return 'Erreur réseau : $innerMsg';
+        }
+        return base.isNotEmpty ? 'Erreur réseau : $base' : 'Erreur réseau inconnue.';
     }
   }
 
@@ -314,6 +339,11 @@ class HermesService {
   /// Le sessionId optionnel est passé via `X-Hermes-Session-Id` pour reprendre
   /// une conversation. Le retour `RunSubmission` contient le runId à utiliser
   /// pour le streaming SSE.
+  ///
+  /// La Runs API accepte uniquement un input texte. Pour les images, passer
+  /// par `streamResponses` (Responses API) — vérifié end-to-end : la Runs
+  /// API ingère silencieusement les payloads structurés mais ne les route
+  /// pas vers le LLM (run.completed instantané, output null).
   Future<RunSubmission> submitRun(
     String input, {
     String? sessionId,
@@ -433,6 +463,191 @@ class HermesService {
       }
     } catch (_) {}
     return null;
+  }
+
+  /// Stream un run via la Responses API (`POST /v1/responses` stream:true).
+  ///
+  /// Utilisé pour les messages avec images — la Runs API ingère silencieusement
+  /// les payloads structurés mais ne les route pas vers le LLM (run.completed
+  /// instantané, output null), alors que la Responses API les traite réellement.
+  ///
+  /// Émet des events compatibles avec `streamRunEvents` pour que ChatController
+  /// les consomme sans distinguer le path :
+  /// - `response.output_text.delta` → `message.delta`
+  /// - `response.completed` → `run.completed`
+  /// - `response.failed` / `response.error` → `run.failed`
+  ///
+  /// `previousResponseId` chaîne le contexte côté serveur pour les suites.
+  Stream<Map<String, dynamic>> streamResponses({
+    required String input,
+    List<ImageAttachment> images = const [],
+    String? previousResponseId,
+    String model = AppConstants.defaultModel,
+  }) async* {
+    final body = <String, dynamic>{
+      'model': model,
+      'stream': true,
+      'input': [
+        {
+          'role': 'user',
+          'content': [
+            {'type': 'input_text', 'text': input},
+            for (final img in images)
+              {'type': 'input_image', 'image_url': img.dataUrl},
+          ],
+        },
+      ],
+      if (previousResponseId != null && previousResponseId.isNotEmpty)
+        'previous_response_id': previousResponseId,
+    };
+
+    if (kIsWeb) {
+      yield* _streamResponsesWeb(body);
+    } else {
+      yield* _streamResponsesNative(body);
+    }
+  }
+
+  Stream<Map<String, dynamic>> _streamResponsesNative(
+      Map<String, dynamic> body) async* {
+    final dio = await _client();
+    try {
+      final response = await dio.post<ResponseBody>(
+        AppConstants.pathResponses,
+        data: body,
+        options: Options(
+          responseType: ResponseType.stream,
+          receiveTimeout: AppConstants.streamTimeout,
+          headers: {'Accept': 'text/event-stream'},
+        ),
+      );
+      final stream = response.data;
+      if (stream == null) return;
+      final lines = stream.stream
+          .cast<List<int>>()
+          .transform(utf8.decoder)
+          .transform(const LineSplitter());
+      await for (final line in lines) {
+        final event = _translateResponsesLine(line);
+        if (event == null) continue;
+        if (event.isEmpty) return;
+        yield event;
+      }
+    } on DioException catch (e) {
+      _throw(e);
+    }
+  }
+
+  Stream<Map<String, dynamic>> _streamResponsesWeb(
+      Map<String, dynamic> body) async* {
+    final baseUrl = await getBaseUrl();
+    final key = await getApiKey();
+    final headers = {
+      if (key != null && key.isNotEmpty) 'Authorization': 'Bearer $key',
+      'Accept': 'text/event-stream',
+      'Content-Type': 'application/json',
+    };
+    final url = '$baseUrl${AppConstants.pathResponses}';
+    final encoded = jsonEncode(body);
+    await for (final line in sse.sseStreamLines(
+      url,
+      headers,
+      method: 'POST',
+      body: encoded,
+    )) {
+      final event = _translateResponsesLine(line);
+      if (event == null) continue;
+      if (event.isEmpty) return;
+      yield event;
+    }
+  }
+
+  /// Traduit une ligne SSE de la Responses API en event Hermes synthétique.
+  /// Format vérifié end-to-end via curl :
+  ///   `event: response.output_text.delta`
+  ///   `data: {"type":"response.output_text.delta","delta":"...","item_id":...}`
+  ///   `event: response.completed`
+  ///   `data: {"type":"response.completed","response":{"id":"resp_...","output":[...],"usage":{...}}}`
+  Map<String, dynamic>? _translateResponsesLine(String line) {
+    if (line.isEmpty) return null;
+    if (line.startsWith(':')) return null;
+    if (line.startsWith('event:')) return null;
+    if (!line.startsWith('data:')) return null;
+    final payload = line.substring(5).trim();
+    if (payload.isEmpty) return null;
+    if (payload == '[DONE]') return const <String, dynamic>{};
+
+    Map<String, dynamic>? json;
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map) {
+        json = Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {
+      return null;
+    }
+    if (json == null) return null;
+
+    final type = (json['type'] as String?) ?? '';
+    final responseId = json['response'] is Map
+        ? (json['response']['id'] as String?)
+        : json['id'] as String?;
+
+    switch (type) {
+      case 'response.output_text.delta':
+        final delta = json['delta'] as String? ?? '';
+        if (delta.isEmpty) return null;
+        return {
+          'event': 'message.delta',
+          'delta': delta,
+          'response_id': ?responseId,
+        };
+
+      case 'response.completed':
+        final usage = json['response'] is Map
+            ? json['response']['usage']
+            : json['usage'];
+        final output = _extractResponsesOutput(json);
+        return {
+          'event': 'run.completed',
+          'output': ?output,
+          'usage': ?usage,
+          'response_id': ?responseId,
+        };
+
+      case 'response.failed':
+      case 'response.error':
+        final err = json['error'];
+        final msg = err is Map ? err['message']?.toString() : null;
+        return {
+          'event': 'run.failed',
+          'error': msg ?? json['message']?.toString() ?? 'Erreur Responses API',
+        };
+
+      default:
+        return null;
+    }
+  }
+
+  String? _extractResponsesOutput(Map<String, dynamic> json) {
+    final response = json['response'];
+    if (response is! Map) return null;
+    final output = response['output'];
+    if (output is! List) return null;
+    final buf = StringBuffer();
+    for (final item in output) {
+      if (item is! Map) continue;
+      final content = item['content'];
+      if (content is! List) continue;
+      for (final c in content) {
+        if (c is Map) {
+          final text = c['text'];
+          if (text is String) buf.write(text);
+        }
+      }
+    }
+    final s = buf.toString();
+    return s.isEmpty ? null : s;
   }
 
   /// Arrête un run en cours.

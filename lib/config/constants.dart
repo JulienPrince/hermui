@@ -19,6 +19,7 @@ class AppConstants {
   static const String pathHealth = '/health';
   static const String pathChatCompletions = '/v1/chat/completions'; // legacy
   static const String pathRuns = '/v1/runs';
+  static const String pathResponses = '/v1/responses';
   static const String pathJobs = '/api/jobs';
 
   static const String defaultModel = 'hermes-agent';

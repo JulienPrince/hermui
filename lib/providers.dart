@@ -7,6 +7,12 @@ import 'services/hermes_service.dart';
 import 'services/notifications.dart';
 import 'services/session_store.dart';
 
+class _QueuedMessage {
+  const _QueuedMessage(this.text, this.images);
+  final String text;
+  final List<ImageAttachment> images;
+}
+
 final hermesServiceProvider = Provider<HermesService>((ref) => HermesService());
 
 final sessionStoreProvider = Provider<SessionStore>((ref) => SessionStore());
@@ -318,6 +324,9 @@ class ChatTurn {
   final bool streaming;
   final String? toolName; // si role == 'tool'
   final TokenUsage? usage; // si role == 'assistant' et run terminé
+  /// Pièces jointes images du tour utilisateur — en mémoire seulement, pas
+  /// persistées (les data URLs sont volumineux).
+  final List<ImageAttachment> images;
 
   const ChatTurn({
     required this.role,
@@ -325,6 +334,7 @@ class ChatTurn {
     this.streaming = false,
     this.toolName,
     this.usage,
+    this.images = const [],
   });
 
   ChatTurn copyWith({
@@ -332,6 +342,7 @@ class ChatTurn {
     bool? streaming,
     String? toolName,
     TokenUsage? usage,
+    List<ImageAttachment>? images,
   }) =>
       ChatTurn(
         role: role,
@@ -339,6 +350,7 @@ class ChatTurn {
         streaming: streaming ?? this.streaming,
         toolName: toolName ?? this.toolName,
         usage: usage ?? this.usage,
+        images: images ?? this.images,
       );
 }
 
@@ -391,7 +403,12 @@ class ChatController extends StateNotifier<ChatState> {
 
   /// Messages saisis pendant qu'un run est en cours — drainés en série dès que
   /// le run actif termine, dans l'ordre d'ajout.
-  final List<String> _pendingQueue = [];
+  final List<_QueuedMessage> _pendingQueue = [];
+
+  /// Dernier `response_id` renvoyé par la Responses API — sert à chaîner via
+  /// `previous_response_id` pour les runs multimodaux successifs. Reset au
+  /// nouveau fil / logout.
+  String? _lastResponseId;
 
   /// Restaure la dernière session active (turns + sessionId) après reload.
   Future<void> _restore() async {
@@ -424,6 +441,7 @@ class ChatController extends StateNotifier<ChatState> {
   /// Démarre une nouvelle conversation — le prochain envoi créera une session.
   Future<void> clear() async {
     _pendingQueue.clear();
+    _lastResponseId = null;
     state = const ChatState();
     await _ref.read(sessionStoreProvider).setLastSessionId(null);
   }
@@ -431,33 +449,34 @@ class ChatController extends StateNotifier<ChatState> {
   /// Efface tout — appelé sur logout.
   Future<void> reset() async {
     _pendingQueue.clear();
+    _lastResponseId = null;
     state = const ChatState();
   }
 
   /// Envoie un message. Si un run est déjà en cours, le message est mis en
   /// queue et la bulle utilisateur affichée immédiatement — il sera envoyé
   /// dès que le run actif termine.
-  Future<void> send(String text) async {
+  Future<void> send(String text, {List<ImageAttachment> images = const []}) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty) return;
+    if (trimmed.isEmpty && images.isEmpty) return;
 
     if (state.sending) {
-      _pendingQueue.add(trimmed);
+      _pendingQueue.add(_QueuedMessage(trimmed, images));
       state = state.copyWith(
         turns: [
           ...state.turns,
-          ChatTurn(role: 'user', content: trimmed),
+          ChatTurn(role: 'user', content: trimmed, images: images),
         ],
       );
       return;
     }
 
-    await _runOne(trimmed, addUserTurn: true);
+    await _runOne(trimmed, images: images, addUserTurn: true);
     while (_pendingQueue.isNotEmpty) {
       final next = _pendingQueue.removeAt(0);
       // La bulle utilisateur a déjà été ajoutée au moment du queue —
       // on n'en remet pas.
-      await _runOne(next, addUserTurn: false);
+      await _runOne(next.text, images: next.images, addUserTurn: false);
     }
   }
 
@@ -474,14 +493,23 @@ class ChatController extends StateNotifier<ChatState> {
     if (turns.isEmpty) return;
     final lastUser = turns.removeLast();
     state = state.copyWith(turns: turns);
-    await _runOne(lastUser.content, addUserTurn: true);
+    await _runOne(
+      lastUser.content,
+      images: lastUser.images,
+      addUserTurn: true,
+    );
   }
 
-  Future<void> _runOne(String trimmed, {required bool addUserTurn}) async {
-    final tentativeTitle = state.title ?? _previewTitle(trimmed);
+  Future<void> _runOne(
+    String trimmed, {
+    required bool addUserTurn,
+    List<ImageAttachment> images = const [],
+  }) async {
+    final tentativeTitle = state.title ??
+        _previewTitle(trimmed.isEmpty ? '📎 image' : trimmed);
     final next = [...state.turns];
     if (addUserTurn) {
-      next.add(ChatTurn(role: 'user', content: trimmed));
+      next.add(ChatTurn(role: 'user', content: trimmed, images: images));
     }
     next.add(const ChatTurn(role: 'assistant', content: '', streaming: true));
     state = state.copyWith(
@@ -491,27 +519,35 @@ class ChatController extends StateNotifier<ChatState> {
       title: tentativeTitle,
     );
 
-    String? finalSessionId = state.sessionId;
-    String? activeRunId;
-
     try {
-      final submission = await _service.submitRun(
-        trimmed,
-        sessionId: state.sessionId,
-      );
-      activeRunId = submission.runId;
-      if (submission.sessionId != null) {
-        finalSessionId = submission.sessionId;
+      if (images.isEmpty) {
+        final submission = await _service.submitRun(
+          trimmed,
+          sessionId: state.sessionId,
+        );
+        final runId = submission.runId;
+        state = state.copyWith(
+          runId: runId,
+          sessionId: submission.sessionId ?? state.sessionId,
+        );
+        await for (final event in _service.streamRunEvents(runId)) {
+          _handleEvent(event);
+        }
+      } else {
+        // Path Responses API : pas de runId → bouton Stop masqué (pas de
+        // /stop natif, on coupe la connexion en fermant la sub côté natif
+        // si besoin un jour).
+        state = state.copyWith(runId: null);
+        await for (final event in _service.streamResponses(
+          input: trimmed,
+          images: images,
+          previousResponseId: _lastResponseId,
+        )) {
+          _handleEvent(event);
+          final rid = event['response_id'] as String?;
+          if (rid != null && rid.isNotEmpty) _lastResponseId = rid;
+        }
       }
-      state = state.copyWith(
-        runId: activeRunId,
-        sessionId: finalSessionId,
-      );
-
-      await for (final event in _service.streamRunEvents(activeRunId)) {
-        _handleEvent(event);
-      }
-
       _finalizeStreaming();
     } catch (e) {
       final updated = [...state.turns];
@@ -529,13 +565,12 @@ class ChatController extends StateNotifier<ChatState> {
         runId: null,
         error: e is HermesException ? e.message : e.toString(),
       );
-      // On vide la queue pour ne pas spammer derrière une erreur réseau.
       _pendingQueue.clear();
       return;
     }
 
     state = state.copyWith(sending: false, runId: null);
-    await _persistSession(state.sessionId ?? finalSessionId, tentativeTitle);
+    await _persistSession(state.sessionId, tentativeTitle);
   }
 
   void _handleEvent(Map<String, dynamic> event) {
