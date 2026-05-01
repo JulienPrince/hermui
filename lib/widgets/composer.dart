@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../providers.dart';
 import '../services/hermes_service.dart';
 import '../theme/text_styles.dart';
 import '../theme/tokens.dart';
@@ -18,7 +20,7 @@ class _AttachedImage {
 }
 
 /// Champ de saisie en bas du chat — conforme au design `Composer` du brief.
-class Composer extends StatefulWidget {
+class Composer extends ConsumerStatefulWidget {
   const Composer({
     super.key,
     required this.controller,
@@ -34,10 +36,10 @@ class Composer extends StatefulWidget {
   final String placeholder;
 
   @override
-  State<Composer> createState() => _ComposerState();
+  ConsumerState<Composer> createState() => _ComposerState();
 }
 
-class _ComposerState extends State<Composer> {
+class _ComposerState extends ConsumerState<Composer> {
   final _focusNode = FocusNode();
   final _picker = ImagePicker();
   final List<_AttachedImage> _images = [];
@@ -96,8 +98,26 @@ class _ComposerState extends State<Composer> {
     return 'image/jpeg';
   }
 
+  bool get _imageAttachAllowed {
+    final caps = ref.read(capabilitiesProvider).valueOrNull;
+    // Si on n'a pas encore de capabilities (FutureProvider en cours / serveur
+    // ancien sans /v1/capabilities), on laisse passer — back-compat.
+    if (caps == null || caps.features.isEmpty) return true;
+    return caps.feature('responses_api', defaultValue: true);
+  }
+
   void _showAttachSheet() {
     if (_picking) return;
+    if (!_imageAttachAllowed) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            "Ce backend n'expose pas /v1/responses — pas de pièce jointe image.",
+          ),
+        ),
+      );
+      return;
+    }
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: HermesTokens.surface1,
@@ -136,7 +156,6 @@ class _ComposerState extends State<Composer> {
               // "Générer une image" caché tant que le serveur n'a pas de
               // provider image gen (FAL.ai / Comfy Cloud / Replicate)
               // configuré côté Hermes Agent. Réactiver via H-107 quand prêt.
-              // _showImageGenSheet() reste défini plus bas.
             ],
           ),
         ),

@@ -4,12 +4,28 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/hermes_service.dart';
 import '../theme/text_styles.dart';
 import '../theme/tokens.dart';
 import 'code_block.dart';
 import 'copy_button.dart';
+import 'tool_icons.dart';
+
+/// Ouvre une URL dans le navigateur externe (Safari/Chrome) ou laisse le système
+/// router (mailto:, tel:…). Échoue silencieusement si malformée — pas d'icône.
+Future<void> _openUrl(String raw) async {
+  final cleaned = raw.trim();
+  if (cleaned.isEmpty) return;
+  final uri = Uri.tryParse(cleaned);
+  if (uri == null) return;
+  try {
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } catch (_) {
+    // best-effort — pas de toast pour ne pas spammer si l'URL est mal formée
+  }
+}
 
 enum CursorStyle { block, token, shimmer }
 
@@ -24,27 +40,7 @@ class ToolMessageBubble extends StatelessWidget {
   final String tool;
   final String preview;
 
-  IconData get _icon {
-    switch (tool.toLowerCase()) {
-      case 'terminal':
-      case 'shell':
-      case 'bash':
-        return Icons.terminal_rounded;
-      case 'python':
-      case 'code':
-        return Icons.code_rounded;
-      case 'http':
-      case 'fetch':
-      case 'web':
-        return Icons.public_rounded;
-      case 'file':
-      case 'read':
-      case 'write':
-        return Icons.description_outlined;
-      default:
-        return Icons.bolt_rounded;
-    }
-  }
+  IconData get _icon => iconForTool(tool);
 
   @override
   Widget build(BuildContext context) {
@@ -338,48 +334,51 @@ class _StreamingText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final base = HermesText.body().copyWith(height: 1.55);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (content.isNotEmpty)
-          GptMarkdown(
-            content,
-            style: base,
-            textAlign: TextAlign.left,
-            codeBuilder: (ctx, name, code, closed) => CodeBlock(
-              code: code,
-              lang: name.isEmpty ? 'text' : name,
-            ),
-            highlightBuilder: (ctx, text, style) => Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: HermesTokens.surface2,
-                borderRadius: BorderRadius.circular(4),
+    return SelectionArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (content.isNotEmpty)
+            GptMarkdown(
+              content,
+              style: base,
+              textAlign: TextAlign.left,
+              codeBuilder: (ctx, name, code, closed) => CodeBlock(
+                code: code,
+                lang: name.isEmpty ? 'text' : name,
               ),
-              child: Text(
-                text,
-                style: HermesText.mono(size: 12.5, color: HermesTokens.text),
+              highlightBuilder: (ctx, text, style) => Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: HermesTokens.surface2,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  text,
+                  style: HermesText.mono(size: 12.5, color: HermesTokens.text),
+                ),
               ),
-            ),
-            linkBuilder: (ctx, label, url, style) => InkWell(
-              onTap: () {},
-              child: Text(
-                label.toPlainText(),
-                style: style.copyWith(
-                  color: HermesTokens.accent,
-                  decoration: TextDecoration.underline,
-                  decorationColor: HermesTokens.accent.withValues(alpha: 0.4),
+              linkBuilder: (ctx, label, url, style) => GestureDetector(
+                onTap: () => _openUrl(url),
+                child: Text(
+                  label.toPlainText(),
+                  style: style.copyWith(
+                    color: HermesTokens.accent,
+                    decoration: TextDecoration.underline,
+                    decorationColor:
+                        HermesTokens.accent.withValues(alpha: 0.4),
+                  ),
                 ),
               ),
             ),
-          ),
-        if (streaming)
-          Padding(
-            padding: EdgeInsets.only(top: content.isEmpty ? 0 : 4),
-            child: _Cursor(style: cursorStyle),
-          ),
-      ],
+          if (streaming)
+            Padding(
+              padding: EdgeInsets.only(top: content.isEmpty ? 0 : 4),
+              child: _Cursor(style: cursorStyle),
+            ),
+        ],
+      ),
     );
   }
 }

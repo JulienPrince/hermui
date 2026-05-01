@@ -90,6 +90,18 @@ class PersonalityPreset {
 
 final hermesServiceProvider = Provider<HermesService>((ref) => HermesService());
 
+/// Capabilities du backend — fetched une fois quand on est configuré, cachée
+/// pour la durée de l'app. Invalidé au logout (via clear settings).
+///
+/// Null = pas encore tenté ou serveur ne supporte pas `/v1/capabilities`.
+/// Les features non listées sont considérées présentes par défaut (back-compat
+/// avec les Hermes anciens qui n'exposaient pas l'endpoint).
+final capabilitiesProvider = FutureProvider<Capabilities?>((ref) async {
+  final settings = ref.watch(settingsProvider);
+  if (!settings.isConfigured) return null;
+  return ref.read(hermesServiceProvider).getCapabilities();
+});
+
 final sessionStoreProvider = Provider<SessionStore>((ref) => SessionStore());
 
 /// Liste des sessions locales — ré-évaluée chaque fois qu'on save / delete.
@@ -568,6 +580,54 @@ class ChatController extends StateNotifier<ChatState> {
     state = state.copyWith(personalityId: id);
   }
 
+  /// Renomme le fil courant côté local. (Côté serveur, la Runs API n'expose
+  /// pas /title — purement local pour l'instant.)
+  Future<void> setTitle(String title) async {
+    final cleaned = title.trim();
+    if (cleaned.isEmpty) return;
+    state = state.copyWith(title: cleaned);
+    final id = state.sessionId;
+    if (id == null) return;
+    final store = _ref.read(sessionStoreProvider);
+    final existing = await store.findById(id);
+    if (existing == null) return;
+    await store.upsert(existing.copyWith(title: cleaned));
+    _ref.invalidate(sessionsProvider);
+  }
+
+  /// Annule la dernière paire (user → assistant). Pas d'aller-retour serveur :
+  /// purement client-side. Persiste la session sans les turns retirés.
+  Future<void> undoLast() async {
+    if (state.sending) return;
+    final turns = [...state.turns];
+    // Tronque les tool/assistant turns qui suivent le dernier user.
+    while (turns.isNotEmpty && turns.last.role != 'user') {
+      turns.removeLast();
+    }
+    if (turns.isEmpty) return;
+    // Retire aussi le dernier user.
+    turns.removeLast();
+    state = state.copyWith(turns: turns);
+    // Persiste la session courante (ou supprime si vide).
+    final id = state.sessionId;
+    if (id == null) return;
+    final store = _ref.read(sessionStoreProvider);
+    if (turns.isEmpty) {
+      await store.delete(id);
+      state = state.copyWith(sessionId: null, title: null);
+    } else {
+      final existing = await store.findById(id);
+      if (existing != null) {
+        final stored = turns
+            .where((t) => !t.streaming && t.content.isNotEmpty)
+            .map((t) => StoredTurn(role: t.role, content: t.content))
+            .toList();
+        await store.upsert(existing.copyWith(turns: stored));
+      }
+    }
+    _ref.invalidate(sessionsProvider);
+  }
+
   /// Ré-exécute le dernier prompt utilisateur. Disponible quand aucun run
   /// n'est en cours et qu'au moins un échange a déjà eu lieu.
   Future<void> regenerate() async {
@@ -695,10 +755,17 @@ class ChatController extends StateNotifier<ChatState> {
         // expansible.
         break;
 
-      case 'hermes.tool.progress':
+      case 'tool.started':
+      case 'hermes.tool.progress': // alias historique
         final tool = event['tool'] as String? ?? 'tool';
         final preview = event['preview'] as String? ?? '';
         _pushToolTurn(tool, preview);
+        break;
+
+      case 'tool.completed':
+        // Mark tool en cours comme terminé. Pour l'instant on ne change pas
+        // le rendu — le tool reste affiché en italique. Future H-100 v2 :
+        // afficher la duration et l'état error/success.
         break;
 
       case 'run.completed':

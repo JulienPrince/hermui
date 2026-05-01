@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -216,17 +218,10 @@ class _ChatHeader extends ConsumerWidget {
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           ),
-          IconButton(
-            tooltip: 'Compte',
-            onPressed: () => _showAccountSheet(context, ref),
-            icon: const Icon(
-              Icons.more_horiz_rounded,
-              size: 18,
-              color: HermesTokens.textDim,
-            ),
-            visualDensity: VisualDensity.compact,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          _ActionsMenu(
+            ref: ref,
+            chat: chat,
+            onAccount: () => _showAccountSheet(context, ref),
           ),
         ],
       ),
@@ -250,7 +245,154 @@ class _ChatHeader extends ConsumerWidget {
       backgroundColor: HermesTokens.surface1,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (_) => const _AccountSheet(),
+      builder: (_) => const FractionallySizedBox(
+        heightFactor: 0.85,
+        child: _AccountSheet(),
+      ),
+    );
+  }
+}
+
+class _ActionsMenu extends StatelessWidget {
+  const _ActionsMenu({
+    required this.ref,
+    required this.chat,
+    required this.onAccount,
+  });
+
+  final WidgetRef ref;
+  final ChatState chat;
+  final VoidCallback onAccount;
+
+  bool get _hasMessages => chat.turns.isNotEmpty;
+  bool get _hasLastUser =>
+      chat.turns.any((t) => t.role == 'user' && !t.streaming);
+  bool get _canRetry =>
+      !chat.sending &&
+      _hasMessages &&
+      chat.turns.any((t) => t.role == 'assistant' && !t.streaming);
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      tooltip: 'Actions',
+      icon: const Icon(
+        Icons.more_horiz_rounded,
+        size: 18,
+        color: HermesTokens.textDim,
+      ),
+      color: HermesTokens.surface1,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(HermesTokens.rMd),
+        side: const BorderSide(color: HermesTokens.border),
+      ),
+      onSelected: (v) async {
+        final ctl = ref.read(chatControllerProvider.notifier);
+        switch (v) {
+          case 'rename':
+            final newTitle = await _promptTitle(context, chat.title);
+            if (newTitle != null) await ctl.setTitle(newTitle);
+            break;
+          case 'retry':
+            await ctl.regenerate();
+            break;
+          case 'undo':
+            await ctl.undoLast();
+            break;
+          case 'account':
+            onAccount();
+            break;
+        }
+      },
+      itemBuilder: (_) => [
+        PopupMenuItem<String>(
+          value: 'rename',
+          enabled: _hasMessages,
+          child: const _MenuRow(
+            icon: Icons.edit_rounded,
+            label: 'Renommer le fil',
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'retry',
+          enabled: _canRetry,
+          child: const _MenuRow(
+            icon: Icons.refresh_rounded,
+            label: 'Régénérer la dernière réponse',
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'undo',
+          enabled: !chat.sending && _hasLastUser,
+          child: const _MenuRow(
+            icon: Icons.undo_rounded,
+            label: 'Annuler le dernier échange',
+          ),
+        ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<String>(
+          value: 'account',
+          child: _MenuRow(
+            icon: Icons.account_circle_outlined,
+            label: 'Compte & déconnexion',
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<String?> _promptTitle(BuildContext context, String? current) {
+    final ctl = TextEditingController(text: current ?? '');
+    return showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: HermesTokens.surface1,
+        title: Text('Renommer le fil', style: HermesText.section()),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          cursorColor: HermesTokens.accent,
+          style: HermesText.body(),
+          decoration: InputDecoration(
+            hintText: 'Nouveau titre',
+            hintStyle: HermesText.body(color: HermesTokens.textMuted),
+            filled: true,
+            fillColor: HermesTokens.surface,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(HermesTokens.rMd),
+              borderSide: const BorderSide(color: HermesTokens.border),
+            ),
+          ),
+          onSubmitted: (v) => Navigator.of(dialogCtx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(ctl.text.trim()),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MenuRow extends StatelessWidget {
+  const _MenuRow({required this.icon, required this.label});
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: HermesTokens.textMuted),
+        const SizedBox(width: 12),
+        Text(label, style: HermesText.body()),
+      ],
     );
   }
 }
@@ -431,8 +573,56 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
   bool _eraseSessions = false;
   bool _busy = false;
 
+  Capabilities? _capabilities;
+  List<String>? _models;
+  HealthSnapshot? _health;
+  Timer? _healthTimer;
+  bool _firstLoad = true;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshAll();
+      _healthTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => _refreshHealth(),
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _healthTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshAll() async {
+    final svc = ref.read(hermesServiceProvider);
+    final results = await Future.wait([
+      svc.getCapabilities(),
+      svc.listModels(),
+      svc.healthDetailed(),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _capabilities = results[0] as Capabilities?;
+      _models = results[1] as List<String>;
+      _health = results[2] as HealthSnapshot;
+      _firstLoad = false;
+    });
+  }
+
+  Future<void> _refreshHealth() async {
+    final svc = ref.read(hermesServiceProvider);
+    final h = await svc.healthDetailed();
+    if (!mounted) return;
+    setState(() => _health = h);
+  }
+
   Future<void> _logout() async {
     setState(() => _busy = true);
+    _healthTimer?.cancel();
     final settingsCtl = ref.read(settingsProvider.notifier);
     final chatCtl = ref.read(chatControllerProvider.notifier);
     final store = ref.read(sessionStoreProvider);
@@ -450,9 +640,12 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final masked = _maskKey(settings.apiKey);
+    final modelName = (_models != null && _models!.isNotEmpty)
+        ? _models!.first
+        : null;
 
     return SafeArea(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -460,18 +653,67 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
           children: [
             Text('Compte', style: HermesText.section()),
             const SizedBox(height: HermesTokens.s4),
+
+            // ── Server ────────────────────────────────
+            _SectionLabel('Serveur'),
+            const SizedBox(height: 8),
+            _HealthRow(
+              health: _health,
+              loading: _firstLoad && _health == null,
+              onRefresh: _refreshHealth,
+            ),
+            const SizedBox(height: 8),
             _Row(
               icon: Icons.public_rounded,
               label: 'URL',
               value: settings.baseUrl.isEmpty ? '—' : settings.baseUrl,
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
+            _Row(
+              icon: Icons.dns_rounded,
+              label: 'Plateforme',
+              value: _capabilities == null
+                  ? (_firstLoad ? '…' : 'inconnue')
+                  : (_capabilities!.version != null
+                      ? '${_capabilities!.platform} v${_capabilities!.version}'
+                      : _capabilities!.platform),
+            ),
+            const SizedBox(height: HermesTokens.s4),
+
+            // ── Agent ─────────────────────────────────
+            _SectionLabel('Agent'),
+            const SizedBox(height: 8),
+            _Row(
+              icon: Icons.smart_toy_rounded,
+              label: 'Profil',
+              value: modelName ?? (_firstLoad ? '…' : 'inconnu'),
+            ),
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text(
+                "Profil Hermes (config.yaml côté serveur). Le LLM réel "
+                "(Gemini, GPT…) n'est pas exposé via l'API.",
+                style: HermesText.caption(color: HermesTokens.textFaint),
+              ),
+            ),
+            if (_capabilities != null && _capabilities!.features.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _CapabilityChips(features: _capabilities!.features),
+            ],
+            const SizedBox(height: HermesTokens.s4),
+
+            // ── Auth ──────────────────────────────────
+            _SectionLabel('Auth'),
+            const SizedBox(height: 8),
             _Row(
               icon: Icons.key_rounded,
               label: 'Bearer',
               value: masked,
             ),
             const SizedBox(height: HermesTokens.s5),
+
+            // ── Actions ───────────────────────────────
             InkWell(
               onTap: () => setState(() => _eraseSessions = !_eraseSessions),
               borderRadius: BorderRadius.circular(HermesTokens.rSm),
@@ -558,6 +800,155 @@ class _AccountSheetState extends ConsumerState<_AccountSheet> {
     if (key == null || key.isEmpty) return '—';
     if (key.length <= 8) return '••••${key.substring(key.length - 2)}';
     return '${key.substring(0, 4)}••••${key.substring(key.length - 4)}';
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text.toUpperCase(),
+      style: HermesText.caption(color: HermesTokens.textFaint).copyWith(
+        fontSize: 10,
+        letterSpacing: 1.0,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
+}
+
+class _HealthRow extends StatelessWidget {
+  const _HealthRow({
+    required this.health,
+    required this.loading,
+    required this.onRefresh,
+  });
+
+  final HealthSnapshot? health;
+  final bool loading;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final reachable = health?.reachable ?? false;
+    final dotColor = loading
+        ? HermesTokens.textFaint
+        : (reachable ? HermesTokens.success : HermesTokens.error);
+    final label = loading
+        ? 'Vérification…'
+        : (reachable ? 'En ligne' : 'Injoignable');
+
+    final stats = <String>[];
+    if (health?.latency != null) {
+      stats.add('${health!.latency!.inMilliseconds} ms');
+    }
+    if (health?.activeSessions != null) {
+      stats.add('${health!.activeSessions} sessions');
+    }
+    if (health?.runningAgents != null) {
+      stats.add('${health!.runningAgents} agents');
+    }
+    if (health?.memMb != null) {
+      stats.add('${health!.memMb!.toStringAsFixed(0)} MB');
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: HermesTokens.surface,
+        border: Border.all(color: HermesTokens.border),
+        borderRadius: BorderRadius.circular(HermesTokens.rMd),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              color: dotColor,
+              borderRadius: BorderRadius.circular(99),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            label,
+            style: HermesText.body().copyWith(fontWeight: FontWeight.w600),
+          ),
+          if (stats.isNotEmpty) ...[
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                stats.join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.end,
+                style: HermesText.mono(
+                  size: 11,
+                  color: HermesTokens.textMuted,
+                ),
+              ),
+            ),
+          ] else
+            const Spacer(),
+          IconButton(
+            tooltip: 'Rafraîchir',
+            onPressed: onRefresh,
+            icon: const Icon(
+              Icons.refresh_rounded,
+              size: 16,
+              color: HermesTokens.textMuted,
+            ),
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CapabilityChips extends StatelessWidget {
+  const _CapabilityChips({required this.features});
+  final Map<String, bool> features;
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = features.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        for (final e in entries)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: e.value
+                  ? HermesTokens.accentSoft
+                  : HermesTokens.surface2,
+              border: Border.all(
+                color: e.value
+                    ? HermesTokens.accent
+                    : HermesTokens.border,
+              ),
+              borderRadius: BorderRadius.circular(99),
+            ),
+            child: Text(
+              e.key.replaceAll('_', ' '),
+              style: HermesText.mono(
+                size: 10,
+                color: e.value
+                    ? HermesTokens.accent
+                    : HermesTokens.textFaint,
+              ).copyWith(fontWeight: FontWeight.w600),
+            ),
+          ),
+      ],
+    );
   }
 }
 

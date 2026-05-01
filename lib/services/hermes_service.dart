@@ -32,6 +32,106 @@ class ImageAttachment {
   final String mimeType;
 }
 
+/// Capabilities renvoyées par `GET /v1/capabilities` — version backend + flags
+/// de features supportées par l'instance.
+class Capabilities {
+  const Capabilities({
+    required this.platform,
+    this.version,
+    this.features = const {},
+  });
+
+  final String platform;
+  final String? version;
+  final Map<String, bool> features;
+
+  bool feature(String name, {bool defaultValue = false}) =>
+      features[name] ?? defaultValue;
+
+  factory Capabilities.fromJson(Map<String, dynamic> json) {
+    final feats = json['features'];
+    final featsMap = <String, bool>{};
+    if (feats is Map) {
+      for (final entry in feats.entries) {
+        if (entry.value is bool) {
+          featsMap[entry.key.toString()] = entry.value as bool;
+        }
+      }
+    }
+    return Capabilities(
+      platform: (json['platform'] ?? 'hermes-agent').toString(),
+      version: json['version']?.toString() ??
+          json['hermes_version']?.toString() ??
+          json['build']?.toString(),
+      features: featsMap,
+    );
+  }
+}
+
+/// Snapshot de `GET /health/detailed`. Tous les champs sont nullables car le
+/// shape varie entre les versions d'Hermes. `latency` est mesurée côté client.
+class HealthSnapshot {
+  const HealthSnapshot({
+    required this.reachable,
+    this.latency,
+    this.activeSessions,
+    this.runningAgents,
+    this.cpuPercent,
+    this.memMb,
+    this.raw,
+  });
+
+  final bool reachable;
+  final Duration? latency;
+  final int? activeSessions;
+  final int? runningAgents;
+  final double? cpuPercent;
+  final double? memMb;
+  final Map<String, dynamic>? raw;
+
+  factory HealthSnapshot.unreachable() =>
+      const HealthSnapshot(reachable: false);
+
+  factory HealthSnapshot.fromJson(
+    Map<String, dynamic> json, {
+    Duration? latency,
+  }) {
+    int? asInt(dynamic v) {
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      if (v is String) return int.tryParse(v);
+      return null;
+    }
+
+    double? asDouble(dynamic v) {
+      if (v is num) return v.toDouble();
+      if (v is String) return double.tryParse(v);
+      return null;
+    }
+
+    final resources = json['resource_usage'] is Map
+        ? Map<String, dynamic>.from(json['resource_usage'] as Map)
+        : json;
+    return HealthSnapshot(
+      reachable: true,
+      latency: latency,
+      activeSessions: asInt(json['active_sessions']) ??
+          asInt(json['sessions']) ??
+          asInt(json['session_count']),
+      runningAgents: asInt(json['running_agents']) ??
+          asInt(json['agents']) ??
+          asInt(json['active_agents']),
+      cpuPercent: asDouble(resources['cpu_percent']) ??
+          asDouble(resources['cpu']) ??
+          asDouble(json['cpu']),
+      memMb: asDouble(resources['memory_mb']) ??
+          asDouble(resources['mem_mb']) ??
+          asDouble(resources['memory']),
+      raw: json,
+    );
+  }
+}
+
 /// Usage tokens — payload de l'event run.completed.
 class TokenUsage {
   const TokenUsage({this.inputTokens = 0, this.outputTokens = 0});
@@ -332,6 +432,85 @@ class HermesService {
       return res.statusCode != null && res.statusCode! < 400;
     } on DioException {
       return false;
+    }
+  }
+
+  /// `GET /health/detailed` — sessions actives, agents, ressources. Fallback
+  /// silencieux sur `/health` si le serveur ne supporte pas le détaillé.
+  Future<HealthSnapshot> healthDetailed() async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      final dio = await _client();
+      final res = await dio.get('${AppConstants.pathHealth}/detailed');
+      stopwatch.stop();
+      final data = res.data;
+      if (data is Map) {
+        return HealthSnapshot.fromJson(
+          Map<String, dynamic>.from(data),
+          latency: stopwatch.elapsed,
+        );
+      }
+      return HealthSnapshot(reachable: true, latency: stopwatch.elapsed);
+    } on DioException catch (e) {
+      // Fallback : /health/detailed n'existe pas → tente /health pour
+      // au moins confirmer reachability + latence.
+      if (e.response?.statusCode == 404) {
+        try {
+          final dio = await _client();
+          final stop2 = Stopwatch()..start();
+          final res = await dio.get(AppConstants.pathHealth);
+          stop2.stop();
+          if (res.statusCode != null && res.statusCode! < 400) {
+            return HealthSnapshot(reachable: true, latency: stop2.elapsed);
+          }
+        } on DioException {
+          // Fallback failed too — on tombe sur unreachable.
+        }
+      }
+      return HealthSnapshot.unreachable();
+    }
+  }
+
+  /// `GET /v1/capabilities` — platform, version, features flags.
+  Future<Capabilities?> getCapabilities() async {
+    try {
+      final dio = await _client();
+      final res = await dio.get('/v1/capabilities');
+      final data = res.data;
+      if (data is Map) {
+        return Capabilities.fromJson(Map<String, dynamic>.from(data));
+      }
+      return null;
+    } on DioException {
+      return null;
+    }
+  }
+
+  /// `GET /v1/models` — liste des agents/profils. OpenAI-compat ; le 1er item
+  /// `id` est typiquement le nom du profil par défaut.
+  Future<List<String>> listModels() async {
+    try {
+      final dio = await _client();
+      final res = await dio.get('/v1/models');
+      final data = res.data;
+      Iterable<dynamic>? items;
+      if (data is Map && data['data'] is List) {
+        items = data['data'] as List;
+      } else if (data is List) {
+        items = data;
+      }
+      if (items == null) return const [];
+      return items
+          .map((m) {
+            if (m is Map) return m['id']?.toString();
+            if (m is String) return m;
+            return null;
+          })
+          .where((id) => id != null && id.isNotEmpty)
+          .cast<String>()
+          .toList();
+    } on DioException {
+      return const [];
     }
   }
 
