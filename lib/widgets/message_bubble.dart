@@ -293,17 +293,20 @@ class AssistantMessageBubble extends StatelessWidget {
                       onTap: onRetry!,
                     ),
                   ],
-                  if (usage != null) ...[
-                    const SizedBox(width: 8),
-                    Text(
-                      '${usage!.inputTokens} in · ${usage!.outputTokens} out',
-                      style: HermesText.mono(
-                        size: 10,
-                        color: HermesTokens.textFaint,
-                      ),
-                    ),
-                  ],
                 ],
+              ),
+            ),
+          ],
+          if (usage != null && !streaming) ...[
+            const SizedBox(height: 2),
+            Padding(
+              padding: const EdgeInsets.only(left: 26),
+              child: Text(
+                '${_fmtTokens(usage!.inputTokens)} in · ${_fmtTokens(usage!.outputTokens)} out',
+                style: HermesText.mono(
+                  size: 10,
+                  color: HermesTokens.textFaint,
+                ),
               ),
             ),
           ],
@@ -311,6 +314,14 @@ class AssistantMessageBubble extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Formatte un compte de tokens en suffixe `k` au-delà de 1000.
+/// `999` → "999", `1234` → "1.2k", `12345` → "12k", `123456` → "123k".
+String _fmtTokens(int n) {
+  if (n < 1000) return n.toString();
+  if (n < 10000) return '${(n / 1000).toStringAsFixed(1)}k';
+  return '${(n / 1000).round()}k';
 }
 
 class _StreamingText extends StatelessWidget {

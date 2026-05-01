@@ -1,16 +1,91 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
 
 import 'config/constants.dart';
 import 'services/hermes_service.dart';
 import 'services/notifications.dart';
 import 'services/session_store.dart';
 
+const _uuid = Uuid();
+
 class _QueuedMessage {
   const _QueuedMessage(this.text, this.images);
   final String text;
   final List<ImageAttachment> images;
+}
+
+/// Preset de personnalité — label affiché + overlay system prompt envoyé
+/// dans le champ `instructions` (Hermes Agent layer ça au-dessus du SOUL.md
+/// serveur, sans casser les outils ni la mémoire). `instruction == null` →
+/// pas d'overlay (= personnalité serveur par défaut).
+class PersonalityPreset {
+  const PersonalityPreset({
+    required this.id,
+    required this.label,
+    required this.icon,
+    required this.instruction,
+  });
+
+  final String id;
+  final String label;
+  final String icon;
+  final String? instruction;
+
+  static const defaultPreset = PersonalityPreset(
+    id: 'default',
+    label: 'Par défaut',
+    icon: '✨',
+    instruction: null,
+  );
+
+  static const presets = <PersonalityPreset>[
+    defaultPreset,
+    PersonalityPreset(
+      id: 'concise',
+      label: 'Concis',
+      icon: '⚡',
+      instruction:
+          'Réponds de façon concise et directe. Pas de préambule, pas de '
+          'résumé final. Va droit au point en 1-3 phrases sauf si la question '
+          'demande explicitement un développement.',
+    ),
+    PersonalityPreset(
+      id: 'technique',
+      label: 'Technique',
+      icon: '🔧',
+      instruction:
+          'Réponds en technicien expert. Utilise la terminologie précise du '
+          'domaine, cite les détails d\'implémentation, mentionne les '
+          'trade-offs et les pièges. Bloc de code quand pertinent.',
+    ),
+    PersonalityPreset(
+      id: 'prof',
+      label: 'Prof',
+      icon: '🎓',
+      instruction:
+          'Explique pédagogiquement avec une analogie, un exemple concret, '
+          'puis une synthèse. Décompose les concepts complexes en étapes '
+          'simples. Anticipe les confusions courantes.',
+    ),
+    PersonalityPreset(
+      id: 'chill',
+      label: 'Détendu',
+      icon: '🌴',
+      instruction:
+          'Adopte un ton décontracté, conversationnel. Pas de formalisme. '
+          'Vouvoiement banni, tu directement.',
+    ),
+  ];
+
+  static PersonalityPreset byId(String? id) {
+    if (id == null) return defaultPreset;
+    return presets.firstWhere(
+      (p) => p.id == id,
+      orElse: () => defaultPreset,
+    );
+  }
 }
 
 final hermesServiceProvider = Provider<HermesService>((ref) => HermesService());
@@ -361,6 +436,7 @@ class ChatState {
   final String? sessionId;
   final String? runId; // run actif en cours de streaming
   final String? title;
+  final String personalityId;
 
   const ChatState({
     this.turns = const [],
@@ -369,7 +445,11 @@ class ChatState {
     this.sessionId,
     this.runId,
     this.title,
+    this.personalityId = 'default',
   });
+
+  PersonalityPreset get personality =>
+      PersonalityPreset.byId(personalityId);
 
   ChatState copyWith({
     List<ChatTurn>? turns,
@@ -378,6 +458,7 @@ class ChatState {
     Object? sessionId = _sentinel,
     Object? runId = _sentinel,
     Object? title = _sentinel,
+    String? personalityId,
   }) =>
       ChatState(
         turns: turns ?? this.turns,
@@ -388,6 +469,7 @@ class ChatState {
             : sessionId as String?,
         runId: identical(runId, _sentinel) ? this.runId : runId as String?,
         title: identical(title, _sentinel) ? this.title : title as String?,
+        personalityId: personalityId ?? this.personalityId,
       );
 
   static const _sentinel = Object();
@@ -480,6 +562,12 @@ class ChatController extends StateNotifier<ChatState> {
     }
   }
 
+  /// Bascule la personnalité active. Persiste pour tous les runs suivants
+  /// dans la session courante. `id == "default"` retire l'overlay.
+  void setPersonality(String id) {
+    state = state.copyWith(personalityId: id);
+  }
+
   /// Ré-exécute le dernier prompt utilisateur. Disponible quand aucun run
   /// n'est en cours et qu'au moins un échange a déjà eu lieu.
   Future<void> regenerate() async {
@@ -519,11 +607,17 @@ class ChatController extends StateNotifier<ChatState> {
       title: tentativeTitle,
     );
 
+    // UUIDv4 par tap envoi → si retry réseau, le serveur dédupe (cache 5 min).
+    // Réutilisé tel quel par regenerate() sur le même tour utilisateur.
+    final idempotencyKey = _uuid.v4();
+    final instructions = state.personality.instruction;
     try {
       if (images.isEmpty) {
         final submission = await _service.submitRun(
           trimmed,
           sessionId: state.sessionId,
+          idempotencyKey: idempotencyKey,
+          instructions: instructions,
         );
         final runId = submission.runId;
         state = state.copyWith(
@@ -542,6 +636,8 @@ class ChatController extends StateNotifier<ChatState> {
           input: trimmed,
           images: images,
           previousResponseId: _lastResponseId,
+          idempotencyKey: idempotencyKey,
+          instructions: instructions,
         )) {
           _handleEvent(event);
           final rid = event['response_id'] as String?;

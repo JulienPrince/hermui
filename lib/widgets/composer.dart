@@ -133,6 +133,10 @@ class _ComposerState extends State<Composer> {
                   _pickFromSource(ImageSource.camera);
                 },
               ),
+              // "Générer une image" caché tant que le serveur n'a pas de
+              // provider image gen (FAL.ai / Comfy Cloud / Replicate)
+              // configuré côté Hermes Agent. Réactiver via H-107 quand prêt.
+              // _showImageGenSheet() reste défini plus bas.
             ],
           ),
         ),
@@ -269,6 +273,10 @@ class _AttachButton extends StatelessWidget {
       child: Container(
         width: 32,
         height: 32,
+        decoration: BoxDecoration(
+          color: HermesTokens.surface2,
+          borderRadius: BorderRadius.circular(HermesTokens.rMd),
+        ),
         alignment: Alignment.center,
         child: busy
             ? const SizedBox(
@@ -280,9 +288,9 @@ class _AttachButton extends StatelessWidget {
                 ),
               )
             : const Icon(
-                Icons.add_photo_alternate_outlined,
-                size: 20,
-                color: HermesTokens.textMuted,
+                Icons.add_rounded,
+                size: 22,
+                color: HermesTokens.text,
               ),
       ),
     );

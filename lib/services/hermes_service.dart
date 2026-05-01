@@ -347,14 +347,27 @@ class HermesService {
   Future<RunSubmission> submitRun(
     String input, {
     String? sessionId,
+    String? idempotencyKey,
+    String? instructions,
     String model = AppConstants.defaultModel,
   }) async {
     try {
       final dio = await _client();
+      final headers = <String, String>{
+        ..._sessionHeaders(sessionId),
+        if (idempotencyKey != null && idempotencyKey.isNotEmpty)
+          'Idempotency-Key': idempotencyKey,
+      };
+      final body = <String, dynamic>{
+        'model': model,
+        'input': input,
+        if (instructions != null && instructions.isNotEmpty)
+          'instructions': instructions,
+      };
       final res = await dio.post(
         AppConstants.pathRuns,
-        data: {'model': model, 'input': input},
-        options: Options(headers: _sessionHeaders(sessionId)),
+        data: body,
+        options: Options(headers: headers),
       );
       final data = res.data;
       String? runId;
@@ -482,6 +495,8 @@ class HermesService {
     required String input,
     List<ImageAttachment> images = const [],
     String? previousResponseId,
+    String? idempotencyKey,
+    String? instructions,
     String model = AppConstants.defaultModel,
   }) async* {
     final body = <String, dynamic>{
@@ -499,17 +514,19 @@ class HermesService {
       ],
       if (previousResponseId != null && previousResponseId.isNotEmpty)
         'previous_response_id': previousResponseId,
+      if (instructions != null && instructions.isNotEmpty)
+        'instructions': instructions,
     };
 
     if (kIsWeb) {
-      yield* _streamResponsesWeb(body);
+      yield* _streamResponsesWeb(body, idempotencyKey: idempotencyKey);
     } else {
-      yield* _streamResponsesNative(body);
+      yield* _streamResponsesNative(body, idempotencyKey: idempotencyKey);
     }
   }
 
   Stream<Map<String, dynamic>> _streamResponsesNative(
-      Map<String, dynamic> body) async* {
+      Map<String, dynamic> body, {String? idempotencyKey}) async* {
     final dio = await _client();
     try {
       final response = await dio.post<ResponseBody>(
@@ -518,7 +535,11 @@ class HermesService {
         options: Options(
           responseType: ResponseType.stream,
           receiveTimeout: AppConstants.streamTimeout,
-          headers: {'Accept': 'text/event-stream'},
+          headers: {
+            'Accept': 'text/event-stream',
+            if (idempotencyKey != null && idempotencyKey.isNotEmpty)
+              'Idempotency-Key': idempotencyKey,
+          },
         ),
       );
       final stream = response.data;
@@ -539,13 +560,15 @@ class HermesService {
   }
 
   Stream<Map<String, dynamic>> _streamResponsesWeb(
-      Map<String, dynamic> body) async* {
+      Map<String, dynamic> body, {String? idempotencyKey}) async* {
     final baseUrl = await getBaseUrl();
     final key = await getApiKey();
     final headers = {
       if (key != null && key.isNotEmpty) 'Authorization': 'Bearer $key',
       'Accept': 'text/event-stream',
       'Content-Type': 'application/json',
+      if (idempotencyKey != null && idempotencyKey.isNotEmpty)
+        'Idempotency-Key': idempotencyKey,
     };
     final url = '$baseUrl${AppConstants.pathResponses}';
     final encoded = jsonEncode(body);

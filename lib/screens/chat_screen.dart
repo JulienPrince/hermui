@@ -200,6 +200,8 @@ class _ChatHeader extends ConsumerWidget {
               ],
             ),
           ),
+          _PersonalityChip(personality: chat.personality, ref: ref),
+          const SizedBox(width: 4),
           IconButton(
             tooltip: 'Nouveau fil',
             onPressed: (hasMessages || hasSession)
@@ -249,6 +251,171 @@ class _ChatHeader extends ConsumerWidget {
       isScrollControlled: true,
       showDragHandle: true,
       builder: (_) => const _AccountSheet(),
+    );
+  }
+}
+
+class _PersonalityChip extends StatelessWidget {
+  const _PersonalityChip({required this.personality, required this.ref});
+
+  final PersonalityPreset personality;
+  final WidgetRef ref;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDefault = personality.id == 'default';
+    return GestureDetector(
+      onTap: () => _showSheet(context),
+      child: Container(
+        height: 28,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: isDefault ? HermesTokens.surface2 : HermesTokens.accentSoft,
+          border: Border.all(
+            color: isDefault ? HermesTokens.border : HermesTokens.accent,
+          ),
+          borderRadius: BorderRadius.circular(99),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(personality.icon, style: const TextStyle(fontSize: 12)),
+            const SizedBox(width: 6),
+            Text(
+              personality.label,
+              style: HermesText.caption(
+                color: isDefault ? HermesTokens.textDim : HermesTokens.accent,
+              ).copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(width: 4),
+            Icon(
+              Icons.expand_more_rounded,
+              size: 14,
+              color: isDefault ? HermesTokens.textFaint : HermesTokens.accent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: HermesTokens.surface1,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetCtx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Personnalité', style: HermesText.section()),
+              const SizedBox(height: 4),
+              Text(
+                "Ajoute un overlay au system prompt côté serveur — l'agent "
+                "garde mémoire et outils, le ton/format change.",
+                style: HermesText.caption(color: HermesTokens.textMuted),
+              ),
+              const SizedBox(height: 12),
+              for (final p in PersonalityPreset.presets)
+                _PresetTile(
+                  preset: p,
+                  selected: p.id == personality.id,
+                  onTap: () {
+                    ref
+                        .read(chatControllerProvider.notifier)
+                        .setPersonality(p.id);
+                    Navigator.of(sheetCtx).pop();
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PresetTile extends StatelessWidget {
+  const _PresetTile({
+    required this.preset,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final PersonalityPreset preset;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(HermesTokens.rMd),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        decoration: BoxDecoration(
+          color: selected ? HermesTokens.accentSoft : HermesTokens.surface,
+          border: Border.all(
+            color: selected ? HermesTokens.accent : HermesTokens.border,
+          ),
+          borderRadius: BorderRadius.circular(HermesTokens.rMd),
+        ),
+        child: Row(
+          children: [
+            Text(preset.icon, style: const TextStyle(fontSize: 18)),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    preset.label,
+                    style: HermesText.body().copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: selected
+                          ? HermesTokens.accent
+                          : HermesTokens.text,
+                    ),
+                  ),
+                  if (preset.instruction != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      preset.instruction!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: HermesText.caption(
+                        color: HermesTokens.textMuted,
+                      ),
+                    ),
+                  ] else ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Aucun overlay — utilise le SOUL.md serveur',
+                      style: HermesText.caption(
+                        color: HermesTokens.textFaint,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (selected) ...[
+              const SizedBox(width: 8),
+              const Icon(
+                Icons.check_rounded,
+                size: 18,
+                color: HermesTokens.accent,
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
