@@ -63,7 +63,7 @@ class _HermesAppState extends ConsumerState<HermesApp> {
     }
 
     return MaterialApp.router(
-      title: 'Hermes',
+      title: 'hermui',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: _buildTheme(),

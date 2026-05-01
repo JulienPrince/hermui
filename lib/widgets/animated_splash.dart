@@ -91,7 +91,7 @@ class _AnimatedSplashState extends State<AnimatedSplash>
                 FadeTransition(
                   opacity: _opacity,
                   child: Text(
-                    'Hermes',
+                    'hermui',
                     style: HermesText.title(color: HermesTokens.textDim)
                         .copyWith(letterSpacing: -0.3),
                   ),

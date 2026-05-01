@@ -149,6 +149,7 @@ class AssistantMessageBubble extends StatelessWidget {
     this.cursorStyle = CursorStyle.block,
     this.showActions = false,
     this.usage,
+    this.onRetry,
     this.children,
   });
 
@@ -157,6 +158,7 @@ class AssistantMessageBubble extends StatelessWidget {
   final CursorStyle cursorStyle;
   final bool showActions;
   final TokenUsage? usage;
+  final VoidCallback? onRetry;
 
   /// Bloc additionnel (CodeBlock, listes…) inséré sous le texte.
   final Widget? children;
@@ -194,7 +196,7 @@ class AssistantMessageBubble extends StatelessWidget {
               ),
               const SizedBox(width: HermesTokens.s2),
               Text(
-                'Hermes',
+                'hermui',
                 style: HermesText.caption(color: HermesTokens.textMuted),
               ),
             ],
@@ -221,11 +223,13 @@ class AssistantMessageBubble extends StatelessWidget {
               child: Row(
                 children: [
                   CopyButton(text: content),
-                  const SizedBox(width: 4),
-                  _ActionButton(
-                    icon: Icons.refresh_rounded,
-                    onTap: () {},
-                  ),
+                  if (onRetry != null) ...[
+                    const SizedBox(width: 4),
+                    _ActionButton(
+                      icon: Icons.refresh_rounded,
+                      onTap: onRetry!,
+                    ),
+                  ],
                   if (usage != null) ...[
                     const SizedBox(width: 8),
                     Text(

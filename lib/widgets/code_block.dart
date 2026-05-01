@@ -47,17 +47,14 @@ class CodeBlock extends StatelessWidget {
               ],
             ),
           ),
-          // Scroll horizontal pour les longues lignes — sinon le code est wrap
-          // par défaut (option par flutter_highlight).
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: HighlightView(
-              code,
-              language: resolvedLang,
-              theme: _hermesIdeTheme,
-              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-              textStyle: HermesText.mono(size: 12.5),
-            ),
+          // Wrap par défaut pour ne pas avoir de scroll horizontal qui
+          // capture les gestes verticaux dans la liste de chat.
+          HighlightView(
+            code,
+            language: resolvedLang,
+            theme: _hermesIdeTheme,
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            textStyle: HermesText.mono(size: 12.5),
           ),
         ],
       ),

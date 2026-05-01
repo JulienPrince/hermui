@@ -346,7 +346,7 @@ class _SessionCard extends ConsumerWidget {
         backgroundColor: HermesTokens.surface1,
         title: Text('Supprimer cette session ?', style: HermesText.section()),
         content: Text(
-          "L'historique local sera effacé. Hermes garde sa mémoire serveur.",
+          "L'historique local sera effacé. hermui garde sa mémoire serveur.",
           style: HermesText.bodySm(color: HermesTokens.textDim),
         ),
         actions: [

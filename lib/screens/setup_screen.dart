@@ -96,7 +96,7 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                       const HermesLogo(size: 28),
                       const SizedBox(width: 10),
                       Text(
-                        'Hermes',
+                        'hermui',
                         style: GoogleFonts.inter(
                           fontSize: 15,
                           fontWeight: FontWeight.w600,

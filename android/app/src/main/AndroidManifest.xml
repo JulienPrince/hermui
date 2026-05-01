@@ -2,7 +2,7 @@
     <!-- Notifications locales (Android 13+ exige cette permission au runtime). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
-        android:label="hermes_app"
+        android:label="hermui"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

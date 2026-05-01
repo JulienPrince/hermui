@@ -9,13 +9,11 @@ class Composer extends StatefulWidget {
     super.key,
     required this.controller,
     required this.onSend,
-    this.sending = false,
-    this.placeholder = 'Demande à Hermes…',
+    this.placeholder = 'Demande à hermui…',
   });
 
   final TextEditingController controller;
   final VoidCallback onSend;
-  final bool sending;
   final String placeholder;
 
   @override
@@ -47,7 +45,6 @@ class _ComposerState extends State<Composer> {
   @override
   Widget build(BuildContext context) {
     final hasText = widget.controller.text.trim().isNotEmpty;
-    final activeButton = hasText || _focused;
 
     return Container(
       padding: EdgeInsets.fromLTRB(
@@ -111,8 +108,8 @@ class _ComposerState extends State<Composer> {
             ),
             const SizedBox(width: HermesTokens.s2),
             _SendButton(
-              active: activeButton,
-              busy: widget.sending,
+              active: hasText,
+              focused: _focused,
               onTap: widget.onSend,
             ),
           ],
@@ -125,41 +122,35 @@ class _ComposerState extends State<Composer> {
 class _SendButton extends StatelessWidget {
   const _SendButton({
     required this.active,
-    required this.busy,
+    required this.focused,
     required this.onTap,
   });
 
+  /// Le bouton est tappable dès qu'il y a du texte — même pendant un run en
+  /// cours, le tap empile le message en queue (cf. ChatController.send).
   final bool active;
-  final bool busy;
+  final bool focused;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    final highlighted = active || focused;
     return GestureDetector(
-      onTap: busy ? null : onTap,
+      onTap: active ? onTap : null,
       child: AnimatedContainer(
         duration: HermesTokens.fast,
         width: 32,
         height: 32,
         decoration: BoxDecoration(
-          color: active ? HermesTokens.accent : HermesTokens.surface2,
+          color: highlighted ? HermesTokens.accent : HermesTokens.surface2,
           borderRadius: BorderRadius.circular(HermesTokens.rMd),
         ),
         alignment: Alignment.center,
-        child: busy
-            ? const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              )
-            : Icon(
-                Icons.arrow_upward_rounded,
-                size: 18,
-                color: active ? Colors.white : HermesTokens.textMuted,
-              ),
+        child: Icon(
+          Icons.arrow_upward_rounded,
+          size: 18,
+          color: highlighted ? Colors.white : HermesTokens.textMuted,
+        ),
       ),
     );
   }

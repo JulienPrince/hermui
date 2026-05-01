@@ -389,6 +389,10 @@ class ChatController extends StateNotifier<ChatState> {
   final HermesService _service;
   final Ref _ref;
 
+  /// Messages saisis pendant qu'un run est en cours — drainés en série dès que
+  /// le run actif termine, dans l'ordre d'ajout.
+  final List<String> _pendingQueue = [];
+
   /// Restaure la dernière session active (turns + sessionId) après reload.
   Future<void> _restore() async {
     final store = _ref.read(sessionStoreProvider);
@@ -419,29 +423,69 @@ class ChatController extends StateNotifier<ChatState> {
 
   /// Démarre une nouvelle conversation — le prochain envoi créera une session.
   Future<void> clear() async {
+    _pendingQueue.clear();
     state = const ChatState();
     await _ref.read(sessionStoreProvider).setLastSessionId(null);
   }
 
   /// Efface tout — appelé sur logout.
   Future<void> reset() async {
+    _pendingQueue.clear();
     state = const ChatState();
   }
 
-  /// Envoie un message via la Runs API : POST /v1/runs puis stream SSE.
+  /// Envoie un message. Si un run est déjà en cours, le message est mis en
+  /// queue et la bulle utilisateur affichée immédiatement — il sera envoyé
+  /// dès que le run actif termine.
   Future<void> send(String text) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty || state.sending) return;
+    if (trimmed.isEmpty) return;
 
+    if (state.sending) {
+      _pendingQueue.add(trimmed);
+      state = state.copyWith(
+        turns: [
+          ...state.turns,
+          ChatTurn(role: 'user', content: trimmed),
+        ],
+      );
+      return;
+    }
+
+    await _runOne(trimmed, addUserTurn: true);
+    while (_pendingQueue.isNotEmpty) {
+      final next = _pendingQueue.removeAt(0);
+      // La bulle utilisateur a déjà été ajoutée au moment du queue —
+      // on n'en remet pas.
+      await _runOne(next, addUserTurn: false);
+    }
+  }
+
+  /// Ré-exécute le dernier prompt utilisateur. Disponible quand aucun run
+  /// n'est en cours et qu'au moins un échange a déjà eu lieu.
+  Future<void> regenerate() async {
+    if (state.sending) return;
+    final turns = [...state.turns];
+    // Tronque tout ce qui suit le dernier message utilisateur (assistant +
+    // tool turns du tour précédent).
+    while (turns.isNotEmpty && turns.last.role != 'user') {
+      turns.removeLast();
+    }
+    if (turns.isEmpty) return;
+    final lastUser = turns.removeLast();
+    state = state.copyWith(turns: turns);
+    await _runOne(lastUser.content, addUserTurn: true);
+  }
+
+  Future<void> _runOne(String trimmed, {required bool addUserTurn}) async {
     final tentativeTitle = state.title ?? _previewTitle(trimmed);
-    final userTurn = ChatTurn(role: 'user', content: trimmed);
-    final assistantTurn = const ChatTurn(
-      role: 'assistant',
-      content: '',
-      streaming: true,
-    );
+    final next = [...state.turns];
+    if (addUserTurn) {
+      next.add(ChatTurn(role: 'user', content: trimmed));
+    }
+    next.add(const ChatTurn(role: 'assistant', content: '', streaming: true));
     state = state.copyWith(
-      turns: [...state.turns, userTurn, assistantTurn],
+      turns: next,
       sending: true,
       error: null,
       title: tentativeTitle,
@@ -468,12 +512,11 @@ class ChatController extends StateNotifier<ChatState> {
         _handleEvent(event);
       }
 
-      // Run terminé sans event explicite → on finalise quand même.
       _finalizeStreaming();
     } catch (e) {
       final updated = [...state.turns];
-      // Retire la bulle assistant streaming si elle est encore vide.
-      if (updated.isNotEmpty && updated.last.streaming &&
+      if (updated.isNotEmpty &&
+          updated.last.streaming &&
           updated.last.content.isEmpty) {
         updated.removeLast();
       } else if (updated.isNotEmpty && updated.last.streaming) {
@@ -486,12 +529,12 @@ class ChatController extends StateNotifier<ChatState> {
         runId: null,
         error: e is HermesException ? e.message : e.toString(),
       );
+      // On vide la queue pour ne pas spammer derrière une erreur réseau.
+      _pendingQueue.clear();
       return;
     }
 
     state = state.copyWith(sending: false, runId: null);
-    // On lit state.sessionId une dernière fois — un event SSE a pu pousser
-    // un identifiant de session entre temps.
     await _persistSession(state.sessionId ?? finalSessionId, tentativeTitle);
   }
 

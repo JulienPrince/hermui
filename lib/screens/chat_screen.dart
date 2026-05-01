@@ -65,26 +65,45 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           _input.text = text;
                           _send();
                         }))
-                  : ListView.builder(
-                      controller: _scroll,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      itemCount: chat.turns.length,
-                      itemBuilder: (_, i) {
-                        final t = chat.turns[i];
-                        if (t.role == 'user') {
-                          return UserMessageBubble(content: t.content);
+                  : Builder(
+                      builder: (_) {
+                        int? lastAssistantIdx;
+                        for (var i = 0; i < chat.turns.length; i++) {
+                          if (chat.turns[i].role == 'assistant') {
+                            lastAssistantIdx = i;
+                          }
                         }
-                        if (t.role == 'tool') {
-                          return ToolMessageBubble(
-                            tool: t.toolName ?? 'tool',
-                            preview: t.content,
-                          );
-                        }
-                        return AssistantMessageBubble(
-                          content: t.content,
-                          streaming: t.streaming,
-                          showActions: !t.streaming && t.content.isNotEmpty,
-                          usage: t.usage,
+                        return ListView.builder(
+                          controller: _scroll,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          itemCount: chat.turns.length,
+                          itemBuilder: (_, i) {
+                            final t = chat.turns[i];
+                            if (t.role == 'user') {
+                              return UserMessageBubble(content: t.content);
+                            }
+                            if (t.role == 'tool') {
+                              return ToolMessageBubble(
+                                tool: t.toolName ?? 'tool',
+                                preview: t.content,
+                              );
+                            }
+                            final canRetry = !chat.sending &&
+                                !t.streaming &&
+                                t.content.isNotEmpty &&
+                                i == lastAssistantIdx;
+                            return AssistantMessageBubble(
+                              content: t.content,
+                              streaming: t.streaming,
+                              showActions: !t.streaming && t.content.isNotEmpty,
+                              usage: t.usage,
+                              onRetry: canRetry
+                                  ? () => ref
+                                      .read(chatControllerProvider.notifier)
+                                      .regenerate()
+                                  : null,
+                            );
+                          },
                         );
                       },
                     ),
@@ -97,7 +116,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               ),
             Composer(
               controller: _input,
-              sending: chat.sending,
               onSend: _send,
             ),
           ],
@@ -445,7 +463,7 @@ class _ChatEmpty extends StatelessWidget {
           children: [
             const HermesLogoOutline(size: 44),
             const SizedBox(height: HermesTokens.s4),
-            Text('Hermes écoute.', style: HermesText.title()),
+            Text('hermui écoute.', style: HermesText.title()),
             const SizedBox(height: 6),
             Text(
               'Demande quelque chose, ou prends un raccourci.',
@@ -541,7 +559,7 @@ class _ResumedEmpty extends StatelessWidget {
             Text('Session reprise.', style: HermesText.title()),
             const SizedBox(height: 6),
             Text(
-              "Hermes garde le contexte côté serveur — continue où tu t'étais arrêté.",
+              "hermui garde le contexte côté serveur — continue où tu t'étais arrêté.",
               style: HermesText.bodySm(color: HermesTokens.textMuted),
               textAlign: TextAlign.center,
             ),
