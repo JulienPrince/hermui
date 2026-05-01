@@ -4,11 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import 'config/constants.dart';
+import 'services/context_refs.dart';
 import 'services/hermes_service.dart';
 import 'services/notifications.dart';
 import 'services/session_store.dart';
 
 const _uuid = Uuid();
+final _contextExpander = ContextRefsExpander();
 
 class _QueuedMessage {
   const _QueuedMessage(this.text, this.images);
@@ -504,7 +506,9 @@ class ChatController extends StateNotifier<ChatState> {
   /// nouveau fil / logout.
   String? _lastResponseId;
 
-  /// Restaure la dernière session active (turns + sessionId) après reload.
+  /// Restaure la dernière session active (turns + sessionId) après reload,
+  /// puis tente de re-attacher à un éventuel run en cours côté serveur si
+  /// l'app a été tuée pendant un streaming.
   Future<void> _restore() async {
     final store = _ref.read(sessionStoreProvider);
     final lastId = await store.getLastSessionId();
@@ -518,6 +522,77 @@ class ChatController extends StateNotifier<ChatState> {
           .map((t) => ChatTurn(role: t.role, content: t.content))
           .toList(),
     );
+    await _maybeResumeRun();
+  }
+
+  /// Si un runId frais (< 5 min) a été persisté, on poll son état :
+  /// - `running` / `pending` → re-attache au stream SSE
+  /// - `completed` → hydrate le output final dans une nouvelle bulle assistant
+  /// - `failed` / autre → marque l'erreur
+  /// - 404 / null → silence (run garbage-collected côté serveur)
+  Future<void> _maybeResumeRun() async {
+    final store = _ref.read(sessionStoreProvider);
+    final recent = await store.getRecentRunId();
+    if (recent == null) return;
+    final runId = recent.runId;
+
+    final status = await _service.getRunStatus(runId);
+    if (status == null) {
+      await store.setLastRunId(null);
+      return;
+    }
+    final s = (status['status'] as String?)?.toLowerCase() ?? '';
+    if (s == 'completed' || s == 'success' || s == 'done') {
+      final output = status['output'] as String?;
+      final usage = TokenUsage.fromJson(status['usage']);
+      if (output != null && output.isNotEmpty) {
+        state = state.copyWith(
+          turns: [
+            ...state.turns,
+            ChatTurn(
+              role: 'assistant',
+              content: output,
+              streaming: false,
+              usage: usage,
+            ),
+          ],
+        );
+        await _persistSession(state.sessionId, state.title ?? 'Conversation');
+      }
+      await store.setLastRunId(null);
+      return;
+    }
+    if (s == 'failed' || s == 'error' || s == 'cancelled') {
+      state = state.copyWith(
+        error: 'Run précédent terminé avec erreur. Réessaie ton message.',
+      );
+      await store.setLastRunId(null);
+      return;
+    }
+    if (s == 'running' || s == 'pending' || s == 'started') {
+      // Re-attache au stream — on ajoute une bulle assistant vide en streaming
+      // et on consomme les events qui restent.
+      state = state.copyWith(
+        turns: [
+          ...state.turns,
+          const ChatTurn(role: 'assistant', content: '', streaming: true),
+        ],
+        sending: true,
+        runId: runId,
+      );
+      try {
+        await for (final event in _service.streamRunEvents(runId)) {
+          _handleEvent(event);
+        }
+        _finalizeStreaming();
+      } catch (_) {
+        // Stream coupé pour de bon — on finalise vide
+        _finalizeStreaming();
+      }
+      state = state.copyWith(sending: false, runId: null);
+      await store.setLastRunId(null);
+      await _persistSession(state.sessionId, state.title ?? 'Conversation');
+    }
   }
 
   /// Reprend une session depuis l'historique. Charge les turns persistés.
@@ -537,7 +612,9 @@ class ChatController extends StateNotifier<ChatState> {
     _pendingQueue.clear();
     _lastResponseId = null;
     state = const ChatState();
-    await _ref.read(sessionStoreProvider).setLastSessionId(null);
+    final store = _ref.read(sessionStoreProvider);
+    await store.setLastSessionId(null);
+    await store.setLastRunId(null);
   }
 
   /// Efface tout — appelé sur logout.
@@ -545,6 +622,7 @@ class ChatController extends StateNotifier<ChatState> {
     _pendingQueue.clear();
     _lastResponseId = null;
     state = const ChatState();
+    await _ref.read(sessionStoreProvider).setLastRunId(null);
   }
 
   /// Envoie un message. Si un run est déjà en cours, le message est mis en
@@ -671,10 +749,14 @@ class ChatController extends StateNotifier<ChatState> {
     // Réutilisé tel quel par regenerate() sur le même tour utilisateur.
     final idempotencyKey = _uuid.v4();
     final instructions = state.personality.instruction;
+    // Expanse les `@url:...` côté client AVANT l'envoi serveur. La bulle
+    // user garde le texte original (plus court / lisible), Hermes voit la
+    // version inline avec les body fetched.
+    final wirePrompt = await _contextExpander.expand(trimmed);
     try {
       if (images.isEmpty) {
         final submission = await _service.submitRun(
-          trimmed,
+          wirePrompt,
           sessionId: state.sessionId,
           idempotencyKey: idempotencyKey,
           instructions: instructions,
@@ -684,6 +766,13 @@ class ChatController extends StateNotifier<ChatState> {
           runId: runId,
           sessionId: submission.sessionId ?? state.sessionId,
         );
+        // Persist le runId pour le resume après cold-start.
+        await _ref.read(sessionStoreProvider).setLastRunId(runId);
+        // Persist la session AVANT le streaming → si l'app est tuée pendant
+        // que ça streame, le message user reste dans le store. Sans ça,
+        // _maybeResumeRun hydrate la réponse assistante mais la question
+        // utilisateur a disparu.
+        await _persistSession(state.sessionId, tentativeTitle);
         await for (final event in _service.streamRunEvents(runId)) {
           _handleEvent(event);
         }
@@ -693,7 +782,7 @@ class ChatController extends StateNotifier<ChatState> {
         // si besoin un jour).
         state = state.copyWith(runId: null);
         await for (final event in _service.streamResponses(
-          input: trimmed,
+          input: wirePrompt,
           images: images,
           previousResponseId: _lastResponseId,
           idempotencyKey: idempotencyKey,
@@ -726,6 +815,8 @@ class ChatController extends StateNotifier<ChatState> {
     }
 
     state = state.copyWith(sending: false, runId: null);
+    // Run terminé proprement → cleanup du runId persisté.
+    await _ref.read(sessionStoreProvider).setLastRunId(null);
     await _persistSession(state.sessionId, tentativeTitle);
   }
 

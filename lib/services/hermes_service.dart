@@ -852,6 +852,23 @@ class HermesService {
     return s.isEmpty ? null : s;
   }
 
+  /// `GET /v1/runs/{id}` — état d'un run sans tenir la SSE ouverte. Retourne
+  /// `{status, output, usage, session_id, model, ...}`. Utilisé par le
+  /// resume-after-cold-start pour décider entre re-attacher au stream ou
+  /// hydrater l'état terminé.
+  Future<Map<String, dynamic>?> getRunStatus(String runId) async {
+    try {
+      final dio = await _client();
+      final res = await dio.get('${AppConstants.pathRuns}/$runId');
+      if (res.data is Map) {
+        return Map<String, dynamic>.from(res.data as Map);
+      }
+      return null;
+    } on DioException {
+      return null;
+    }
+  }
+
   /// Arrête un run en cours.
   Future<void> stopRun(String runId) async {
     try {

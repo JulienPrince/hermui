@@ -92,6 +92,8 @@ class SessionStore {
 
   static const _sessionsKey = 'hermes_sessions_v2';
   static const _lastSessionIdKey = 'hermes_last_session_id';
+  static const _lastRunIdKey = 'hermes_last_run_id';
+  static const _lastRunIdAtKey = 'hermes_last_run_id_at';
 
   final Future<SharedPreferences> _prefs;
 
@@ -145,6 +147,8 @@ class SessionStore {
     final prefs = await _prefs;
     await prefs.remove(_sessionsKey);
     await prefs.remove(_lastSessionIdKey);
+    await prefs.remove(_lastRunIdKey);
+    await prefs.remove(_lastRunIdAtKey);
   }
 
   Future<String?> getLastSessionId() async {
@@ -159,6 +163,46 @@ class SessionStore {
     } else {
       await prefs.setString(_lastSessionIdKey, id);
     }
+  }
+
+  /// Persist le runId du run en cours. Permet de re-attacher au stream après
+  /// kill/restart de l'app si le run est encore vivant côté serveur.
+  /// Stamp millisecond → on peut filtrer les runs trop vieux (> 5 min).
+  Future<void> setLastRunId(String? id) async {
+    final prefs = await _prefs;
+    if (id == null || id.isEmpty) {
+      await prefs.remove(_lastRunIdKey);
+      await prefs.remove(_lastRunIdAtKey);
+    } else {
+      await prefs.setString(_lastRunIdKey, id);
+      await prefs.setInt(
+        _lastRunIdAtKey,
+        DateTime.now().millisecondsSinceEpoch,
+      );
+    }
+  }
+
+  /// Retourne `(runId, age)` si un run a été persisté il y a moins de
+  /// `maxAge`, sinon null. Le runId est conservé tel quel dans les prefs ;
+  /// l'âge laisse le caller décider quoi en faire.
+  Future<({String runId, Duration age})?> getRecentRunId({
+    Duration maxAge = const Duration(minutes: 5),
+  }) async {
+    final prefs = await _prefs;
+    final id = prefs.getString(_lastRunIdKey);
+    if (id == null || id.isEmpty) return null;
+    final atMs = prefs.getInt(_lastRunIdAtKey);
+    if (atMs == null) return null;
+    final age = Duration(
+      milliseconds: DateTime.now().millisecondsSinceEpoch - atMs,
+    );
+    if (age > maxAge) {
+      // Stale → on nettoie pour ne pas reprobe à chaque boot.
+      await prefs.remove(_lastRunIdKey);
+      await prefs.remove(_lastRunIdAtKey);
+      return null;
+    }
+    return (runId: id, age: age);
   }
 
   Future<void> _save(List<LocalSession> sessions) async {
