@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../providers.dart';
 import '../services/hermes_service.dart';
-import '../services/notifications.dart';
 import '../theme/text_styles.dart';
 import '../theme/tokens.dart';
 import '../widgets/sparkline.dart';
@@ -333,30 +333,28 @@ class _JobDetailsSheetState extends ConsumerState<_JobDetailsSheet> {
     }
   }
 
-  /// Trigger manuel — on a la version d'avant et d'après, donc on déclenche
-  /// la notif ici directement (le polling ne verra pas la différence puisqu'on
-  /// remplace l'état avec la version post-run).
+  /// Trigger manuel — on contourne `/api/jobs/{id}/run` (qui exécute
+  /// côté serveur sans exposer le résultat) et on lance le prompt du job
+  /// via `/v1/runs` dans une nouvelle session de chat. L'utilisateur voit
+  /// la réponse streamer en direct dans l'onglet Chat.
   Future<void> _trigger() async {
-    final before = _job;
+    final job = _job;
+    final prompt = (job.prompt ?? '').trim();
+    if (prompt.isEmpty) {
+      _showSnack('Ce job n\'a pas de prompt.', error: true);
+      return;
+    }
     setState(() => _busy = true);
+    final chatCtl = ref.read(chatControllerProvider.notifier);
+    final navigator = Navigator.of(context);
     try {
-      final updated =
-          await ref.read(hermesServiceProvider).triggerJob(before.id);
-      ref.read(jobsProvider.notifier).replace(updated);
-      if (mounted) setState(() => _local = updated);
-
-      final body = updated.lastResult ?? updated.status ?? 'Run terminé';
-      final isError = (updated.status?.toLowerCase() == 'failed') ||
-          body.toLowerCase().contains('error');
-      await NotificationsService.instance.notify(
-        title: updated.name,
-        body: body,
-        emoji: isError ? '❌' : '✅',
-      );
-
-      if (mounted) {
-        _showSnack('Déclenché : ${updated.name}');
-      }
+      // Ferme le sheet de détail du job (et le cas échéant le sheet de
+      // confirmation), puis bascule sur l'onglet Chat avant de submit
+      // pour que l'utilisateur voie le streaming arriver.
+      if (mounted) navigator.pop();
+      // ignore: use_build_context_synchronously
+      if (mounted) GoRouter.of(context).go('/chat');
+      await chatCtl.runJobInChat(jobName: job.name, prompt: prompt);
     } catch (e) {
       _showSnack(e is HermesException ? e.message : '$e', error: true);
     } finally {

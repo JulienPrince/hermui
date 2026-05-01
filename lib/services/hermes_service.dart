@@ -262,13 +262,22 @@ class JobSummary {
   }
 }
 
-/// Payload de création/mise à jour d'un job.
+/// Payload de création/mise à jour d'un job. Le minimum requis = `prompt`
+/// + `schedule`. Tous les autres champs sont optionnels et matchent ce que la
+/// Jobs API Hermes accepte sur `POST /api/jobs` (cf. `features/cron.md` +
+/// `developer-guide/cron-internals.md`).
 class JobInput {
   const JobInput({
     this.name,
     required this.prompt,
     required this.schedule,
     this.skills,
+    this.deliver,
+    this.enabledToolsets,
+    this.script,
+    this.contextFrom,
+    this.workdir,
+    this.repeat,
   });
 
   final String? name;
@@ -276,11 +285,45 @@ class JobInput {
   final String schedule;
   final List<String>? skills;
 
+  /// Cible de delivery du résultat. Format Hermes :
+  /// - `origin` (default : retombe dans le chat ayant créé le job)
+  /// - `local` (log seulement, pas de delivery)
+  /// - `telegram:@me` ou `telegram:@username`
+  /// - `discord:#channel`
+  /// - `webhook:https://...`
+  final String? deliver;
+
+  /// Toolsets autorisés pour ce job. Restreint ce que l'agent peut appeler.
+  /// Valeurs valides : `web`, `memory`, `files`, `terminal`, `browser`,
+  /// `image`, `voice`, `mcp`, `code` (cf. `reference/toolsets-reference.md`).
+  final List<String>? enabledToolsets;
+
+  /// Chemin absolu côté serveur d'un shell script lancé AVANT l'agent.
+  final String? script;
+
+  /// Noms d'autres jobs dont le dernier output devient l'input de celui-ci.
+  /// Permet de chaîner des jobs (fetch → summarize → notify).
+  final List<String>? contextFrom;
+
+  /// Working directory côté serveur (utile quand le job édite des fichiers).
+  final String? workdir;
+
+  /// Nombre de répétitions à chaque tick (default 1).
+  final int? repeat;
+
   Map<String, dynamic> toJson() => {
         if (name != null && name!.isNotEmpty) 'name': name,
         'prompt': prompt,
         'schedule': schedule,
-        if (skills != null) 'skills': skills,
+        if (skills != null && skills!.isNotEmpty) 'skills': skills,
+        if (deliver != null && deliver!.isNotEmpty) 'deliver': deliver,
+        if (enabledToolsets != null && enabledToolsets!.isNotEmpty)
+          'enabled_toolsets': enabledToolsets,
+        if (script != null && script!.isNotEmpty) 'script': script,
+        if (contextFrom != null && contextFrom!.isNotEmpty)
+          'context_from': contextFrom,
+        if (workdir != null && workdir!.isNotEmpty) 'workdir': workdir,
+        if (repeat != null) 'repeat': repeat,
       };
 }
 

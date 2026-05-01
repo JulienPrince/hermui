@@ -6,6 +6,10 @@ import '../services/hermes_service.dart';
 import '../theme/text_styles.dart';
 import '../theme/tokens.dart';
 
+/// Préfixe Hermes qui désactive la delivery sauf en cas d'erreur. Préfixe
+/// poussé devant le prompt si le toggle "Silencieux sauf erreur" est activé.
+const _silentPrefix = '[SILENT] ';
+
 /// Sheet de création / édition d'un job. Si [initial] est fourni → édition.
 class JobFormSheet extends ConsumerStatefulWidget {
   const JobFormSheet({super.key, this.initial});
@@ -27,22 +31,34 @@ class JobFormSheet extends ConsumerStatefulWidget {
 }
 
 class _JobFormSheetState extends ConsumerState<JobFormSheet> {
-  late final TextEditingController _name = TextEditingController(
-    text: widget.initial?.name == widget.initial?.id
-        ? ''
-        : widget.initial?.name ?? '',
-  );
-  late final TextEditingController _prompt = TextEditingController(
-    text: widget.initial?.prompt ?? '',
-  );
-  late final TextEditingController _schedule = TextEditingController(
-    text: widget.initial?.schedule ?? '',
-  );
+  late final TextEditingController _name;
+  late final TextEditingController _prompt;
+  late final TextEditingController _schedule;
+
+  bool _silent = false;
 
   bool _busy = false;
   String? _error;
 
   bool get _isEdit => widget.initial != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final initialPrompt = widget.initial?.prompt ?? '';
+    _silent = initialPrompt.startsWith(_silentPrefix);
+    _name = TextEditingController(
+      text: widget.initial?.name == widget.initial?.id
+          ? ''
+          : widget.initial?.name ?? '',
+    );
+    _prompt = TextEditingController(
+      text: _silent
+          ? initialPrompt.substring(_silentPrefix.length)
+          : initialPrompt,
+    );
+    _schedule = TextEditingController(text: widget.initial?.schedule ?? '');
+  }
 
   @override
   void dispose() {
@@ -53,9 +69,9 @@ class _JobFormSheetState extends ConsumerState<JobFormSheet> {
   }
 
   Future<void> _submit() async {
-    final prompt = _prompt.text.trim();
+    final promptRaw = _prompt.text.trim();
     final schedule = _schedule.text.trim();
-    if (prompt.isEmpty) {
+    if (promptRaw.isEmpty) {
       setState(() => _error = 'Le prompt est requis.');
       return;
     }
@@ -71,15 +87,14 @@ class _JobFormSheetState extends ConsumerState<JobFormSheet> {
       final service = ref.read(hermesServiceProvider);
       final input = JobInput(
         name: _name.text.trim().isEmpty ? null : _name.text.trim(),
-        prompt: prompt,
+        prompt: _silent ? '$_silentPrefix$promptRaw' : promptRaw,
         schedule: schedule,
       );
       if (_isEdit) {
-        final updated = await service.updateJob(widget.initial!.id, input);
-        ref.read(jobsProvider.notifier).replace(updated);
+        final saved = await service.updateJob(widget.initial!.id, input);
+        ref.read(jobsProvider.notifier).replace(saved);
       } else {
         await service.createJob(input);
-        // Création → on doit refetch (le nouveau job n'est pas en local).
         await ref.read(jobsProvider.notifier).refresh();
       }
       if (mounted) Navigator.of(context).pop(true);
@@ -131,7 +146,18 @@ class _JobFormSheetState extends ConsumerState<JobFormSheet> {
                 monospace: true,
               ),
               const SizedBox(height: 8),
-              const _CronPresets(),
+              _CronPresets(onPick: (e) {
+                _schedule.text = e;
+                _schedule.selection = TextSelection.collapsed(offset: e.length);
+              }),
+              const SizedBox(height: HermesTokens.s5),
+              _OptionTile(
+                value: _silent,
+                title: 'Silencieux sauf erreur',
+                subtitle:
+                    'Préfixe [SILENT] — pas de notif sur les runs réussis.',
+                onChanged: (v) => setState(() => _silent = v),
+              ),
               if (_error != null) ...[
                 const SizedBox(height: HermesTokens.s3),
                 Container(
@@ -280,8 +306,84 @@ class _FieldState extends State<_Field> {
   }
 }
 
+class _OptionTile extends StatelessWidget {
+  const _OptionTile({
+    required this.value,
+    required this.title,
+    required this.subtitle,
+    required this.onChanged,
+  });
+
+  final bool value;
+  final String title;
+  final String subtitle;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => onChanged(!value),
+      borderRadius: BorderRadius.circular(HermesTokens.rMd),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: HermesTokens.surface,
+          border: Border.all(color: HermesTokens.border),
+          borderRadius: BorderRadius.circular(HermesTokens.rMd),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 18,
+              height: 18,
+              margin: const EdgeInsets.only(top: 2),
+              decoration: BoxDecoration(
+                color: value ? HermesTokens.accent : Colors.transparent,
+                border: Border.all(
+                  color:
+                      value ? HermesTokens.accent : HermesTokens.borderStrong,
+                ),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              alignment: Alignment.center,
+              child: value
+                  ? const Icon(
+                      Icons.check_rounded,
+                      size: 12,
+                      color: Colors.white,
+                    )
+                  : null,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    style: HermesText.bodySm(color: HermesTokens.textDim)
+                        .copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    subtitle,
+                    style: HermesText.caption(color: HermesTokens.textFaint),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _CronPresets extends StatelessWidget {
-  const _CronPresets();
+  const _CronPresets({required this.onPick});
+
+  final ValueChanged<String> onPick;
 
   static const _presets = <_CronPreset>[
     _CronPreset(expr: '*/15 * * * *', label: 'toutes les 15 min'),
@@ -293,35 +395,25 @@ class _CronPresets extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Builder(
-      builder: (context) {
-        return Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            for (final p in _presets) _PresetChip(preset: p),
-          ],
-        );
-      },
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        for (final p in _presets) _PresetChip(preset: p, onPick: onPick),
+      ],
     );
   }
 }
 
 class _PresetChip extends StatelessWidget {
-  const _PresetChip({required this.preset});
+  const _PresetChip({required this.preset, required this.onPick});
   final _CronPreset preset;
+  final ValueChanged<String> onPick;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () {
-        // Trouve le _FieldState parent contenant le controller "Schedule".
-        final form = context.findAncestorStateOfType<_JobFormSheetState>();
-        form?._schedule.text = preset.expr;
-        form?._schedule.selection = TextSelection.collapsed(
-          offset: preset.expr.length,
-        );
-      },
+      onTap: () => onPick(preset.expr),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
         decoration: BoxDecoration(

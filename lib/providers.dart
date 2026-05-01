@@ -234,6 +234,15 @@ class JobsController extends AsyncNotifier<List<JobSummary>> {
     _scheduleNextPoll(result.valueOrNull ?? const []);
   }
 
+  /// Force le polling intensif immédiat — utilisé après un trigger manuel
+  /// pour détecter la fin du run sans attendre que `next_run_at` se rapproche.
+  /// La snapshot prise ici capture l'état "running" → toute transition
+  /// vers `ok`/`failed` ou changement de `last_result` sera signalée.
+  void forceIntensivePoll() {
+    _cancelTimer();
+    _startIntensivePoll();
+  }
+
   // ---- Polling logic ----
 
   void _cancelTimer() {
@@ -342,6 +351,11 @@ class JobsController extends AsyncNotifier<List<JobSummary>> {
         body: after.lastResult,
         emoji: isError ? '❌' : '✅',
       );
+      // Note : Hermes n'expose pas le contenu d'un cron run via l'API
+      // (`last_status` est juste "ok"). On peut pas créer un fil avec le
+      // résultat — c'est une limitation côté serveur. Le seul moyen de
+      // voir un résultat est via le trigger manuel qui passe par
+      // `ChatController.runJobInChat()` (chat session avec streaming).
       return;
     }
     // last_run_at avancé sans message d'erreur → run terminé OK
@@ -363,6 +377,7 @@ class JobsController extends AsyncNotifier<List<JobSummary>> {
       );
     }
   }
+
 }
 
 /// Signature comparable d'un job pour détecter qu'il s'est passé quelque chose
@@ -656,6 +671,29 @@ class ChatController extends StateNotifier<ChatState> {
   /// dans la session courante. `id == "default"` retire l'overlay.
   void setPersonality(String id) {
     state = state.copyWith(personalityId: id);
+  }
+
+  /// Lance un job en mode "chat" : on prend son prompt et on l'envoie via
+  /// `/v1/runs` au lieu de `/api/jobs/{id}/run` (qui exécute server-side
+  /// sans qu'on voie le résultat). Crée une nouvelle session locale avec
+  /// un titre dérivé du nom du job. Utilisé par le trigger manuel depuis
+  /// l'écran Jobs — l'utilisateur retombe dans le chat et voit la réponse
+  /// streamer.
+  Future<void> runJobInChat({
+    required String jobName,
+    required String prompt,
+  }) async {
+    if (prompt.trim().isEmpty) return;
+    _pendingQueue.clear();
+    _lastResponseId = null;
+    final now = DateTime.now();
+    final dateLabel = '${now.day.toString().padLeft(2, '0')}/'
+        '${now.month.toString().padLeft(2, '0')} '
+        '${now.hour.toString().padLeft(2, '0')}:'
+        '${now.minute.toString().padLeft(2, '0')}';
+    state = ChatState(title: '⏰ $jobName · $dateLabel');
+    await _ref.read(sessionStoreProvider).setLastSessionId(null);
+    await send(prompt);
   }
 
   /// Renomme le fil courant côté local. (Côté serveur, la Runs API n'expose

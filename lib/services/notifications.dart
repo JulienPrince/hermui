@@ -34,26 +34,37 @@ class NotificationsService {
           android: AndroidInitializationSettings('@mipmap/ic_launcher'),
           iOS: DarwinInitializationSettings(
             requestAlertPermission: true,
-            requestBadgePermission: false,
+            requestBadgePermission: true,
             requestSoundPermission: true,
+            // iOS supprime les notifs locales tant que l'app est au foreground.
+            // On force la présentation pour que les fins de job soient
+            // visibles même quand on est dans hermui.
+            defaultPresentAlert: true,
+            defaultPresentBanner: true,
+            defaultPresentList: true,
+            defaultPresentSound: true,
+            defaultPresentBadge: false,
           ),
           macOS: DarwinInitializationSettings(
             requestAlertPermission: true,
             requestBadgePermission: false,
             requestSoundPermission: true,
+            defaultPresentAlert: true,
+            defaultPresentBanner: true,
+            defaultPresentList: true,
           ),
         ),
       );
-      // Permission runtime — Android 13+ exige une demande explicite, iOS la
-      // demande au premier `show()` mais on la pré-déclenche ici pour ne pas
-      // perdre la première notif.
+      // Permission runtime — Android 13+ exige une demande explicite, iOS
+      // est handled by Darwin init mais on rappelle au cas où l'utilisateur
+      // a refusé puis ré-accepté en réglages.
       final android = _plugin.resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
       await android?.requestNotificationsPermission();
 
       final ios = _plugin.resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin>();
-      await ios?.requestPermissions(alert: true, sound: true);
+      await ios?.requestPermissions(alert: true, sound: true, badge: true);
     } catch (e) {
       debugPrint('NotificationsService.init error: $e');
     }
@@ -85,8 +96,18 @@ class NotificationsService {
             importance: Importance.high,
             priority: Priority.high,
           ),
-          iOS: DarwinNotificationDetails(),
-          macOS: DarwinNotificationDetails(),
+          iOS: DarwinNotificationDetails(
+            // Force l'affichage banner même quand hermui est au foreground.
+            presentAlert: true,
+            presentBanner: true,
+            presentList: true,
+            presentSound: true,
+          ),
+          macOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBanner: true,
+            presentList: true,
+          ),
         ),
       );
     } catch (e) {
